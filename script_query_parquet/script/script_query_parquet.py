@@ -278,7 +278,7 @@ class ConfigManager(object):
         table_list = ["'{0}'".format(tbl) for tbl in target_tables]
         in_clause = ",".join(table_list)
         
-        sql_query = "\\copy (SELECT database_name, original_table_name, th_column_name, active_flag FROM {0} WHERE original_table_name IN ({1})) TO '{2}' WITH CSV HEADER;".format(
+        sql_query = "\\copy (SELECT database_name, original_table_name, th_column_name, COALESCE(active_flag,'Y') FROM {0} WHERE original_table_name IN ({1})) TO '{2}' WITH CSV HEADER;".format(
             self.thai_mapping_table, in_clause, self.thai_mapping_export_path)
         self.logger.info("Generated SQL Query for Thai Mapping: {0}".format(sql_query))
         cmd = [

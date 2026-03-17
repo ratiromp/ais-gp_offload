@@ -154,8 +154,9 @@ def setup_logging(log_dir, log_name="app", timestamp=None):
 # ==============================================================================
 
 class ConfigManager(object):
-    def __init__(self, env_config_path, master_config_path, map_config_path, list_file_path, cli_tables, logger):
+    def __init__(self, env_config_path, master_config_path, map_config_path, list_file_path, cli_tables, logger, global_date_folder):
         self.logger = logger
+        self.global_date_folder = global_date_folder
 
         self.logger.info("Loading environment config: {0}".format(env_config_path))
         self.succeed_path = ''
@@ -202,6 +203,10 @@ class ConfigManager(object):
         except IOError as e:
             self.logger.critical("Cannot find env_config file: {0}".format(e))
             raise
+
+        # Create temp dir if not exists
+        if self.nas_destination:
+                self.nas_destination = os.path.join(self.nas_destination, self.global_date_folder)
 
         # 2. Load Target Tables (Moved up before Thai mapping logic to build IN clause)
         self.execution_list = []
@@ -854,8 +859,9 @@ class ParquetQueryJob(object):
         self.global_ts = global_ts
         self.out_path = final_out_dir
         self.tracker = ProcessTracker(logger)
+        self.global_date_folder = global_date_folder
 
-        self.config = ConfigManager(args.env, args.master, args.map, args.list, args.table_name, logger)
+        self.config = ConfigManager(args.env, args.master, args.map, args.list, args.table_name, logger, self.global_date_folder)
 
         self.logger.info("Initializing SparkSession with FAIR scheduler...")
         self.spark = SparkSession.builder.appName("script_reconcile_query_parquet") \

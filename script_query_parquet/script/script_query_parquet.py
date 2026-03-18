@@ -719,10 +719,7 @@ class Worker(threading.Thread):
                         elif m_col in type_map:
                             actual_type = type_map[m_col]
                             if not re.match(dtype_pattern, actual_type, re.IGNORECASE):
-                                mismatch_dtype[m_col] = {
-                                    'expect_on_gp': 'integer/bigint', 
-                                    'actual_on_gp': actual_type
-                                }
+                                mismatch_dtype[m_col] = actual_type
                             elif re.match(dtype_pattern, actual_type, re.IGNORECASE):
                                 new_manual_col.append(m_col)
 
@@ -730,7 +727,7 @@ class Worker(threading.Thread):
                     self.logger.warning("List of manual column not found on GP table: {0}".format(not_found_list))
                 if len(mismatch_dtype) > 0:
                     self.logger.warning("Datatype mismatch, Expect all manual column datatype to be int or bigint, Got : {0}".format(mismatch_dtype))
-                self.logger.info("Final manual column list {0}".format(new_manual_col))
+                self.logger.info("Validated column list {0}".format(new_manual_col))
                 
                 cat_cols = {'SUM_MIN_MAX': [], 'MIN_MAX': [], 'MD5_MIN_MAX': [], 'TYPE_MAP': type_map, 
                             'MANUAL_NUM': new_manual_col}

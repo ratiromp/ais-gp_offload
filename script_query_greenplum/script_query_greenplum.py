@@ -1,6 +1,21 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+#-- Input File Pattern --#
+# <database>|<schema>.<table>
+
+#-- Stat File Columns --#
+# 1) greenplum_tbl
+# 2) start_timestamp
+# 3) end_timestamp
+# 4) duration
+# 5) reconcile_method
+# 6) run_status
+# 7) error_message
+# 8) json_output_path
+# 9) remark
+
+
 import sys
 import os
 import csv
@@ -15,6 +30,7 @@ import re
 import json
 import glob
 from datetime import datetime
+import uuid
 
 # ==============================================================================
 # 1. Utilities: Logger & ProcessTracker
@@ -58,9 +74,8 @@ class ProcessTracker(object):
         self.logger.info("="*80)
 
         success_count = 0
-        warning_count = 0
+        #fnedit-remove# warning_count = 0
         failed_count = 0
-        skipped_count = 0
 
         if not self.results:
             self.logger.info("No tables processed.")
@@ -76,11 +91,9 @@ class ProcessTracker(object):
                 if len(r['table']) > max_w_table: max_w_table = len(r['table'])
                 if len(r['status']) > max_w_status: max_w_status = len(r['status'])
 
-                if r['status'] == 'SUCCESS': success_count += 1
-                elif r['status'] == 'WARNING': warning_count += 1
+                if r['status'] == 'SUCCEEDED': success_count += 1
+                #fnedit-remove# elif r['status'] == 'WARNING': warning_count += 1
                 elif r['status'] == 'FAILED': failed_count += 1
-                elif r['status'] == 'SKIPPED': skipped_count +=1
-                       
             
             w_table = max_w_table + 2
             w_status = max_w_status + 2
@@ -99,21 +112,23 @@ class ProcessTracker(object):
                 self.logger.info(row_fmt.format(r['table'], r['status'], r['message'], wt=w_table, ws=w_status))
             
             self.logger.info(sep_line)
-            self.logger.info("Total: {0} | Success: {1} | Warning: {2} | Failed: {3} | Skipped: {4}".format(
-                len(self.results), success_count, warning_count, failed_count, skipped_count
+            #fnedit-remove# self.logger.info("Total: {0} | Success: {1} | Warning: {2} | Failed: {3}".format(
+            #fnedit-remove#     len(self.results), success_count, warning_count, failed_count
+            #fnedit-remove# ))
+            self.logger.info("Total: {0} | Success: {1} | Failed: {2}".format(
+                len(self.results), success_count, failed_count
             ))
             self.logger.info("Total Execution Time: {0:.2f}s".format(time.time() - self.start_time))
 
         # Print Summary to Console (Last view)
         print("\n" + "="*80)
-        print("FINAL SUMMARY REPORT")
+        print(" FINAL SUMMARY REPORT")
         print("="*80)
-        print("Total: {0}".format(len(self.results)))
-        print("Success: {0}".format(success_count))
-        print("Warning: {0}".format(warning_count))
-        print("Failed:  {0}".format(failed_count))
-        print("Skipped: {0}".format(skipped_count))
-        print("Log File: {0}".format(log_path))
+        print(" Total: {0}".format(len(self.results)))
+        print(" Success: {0}".format(success_count))
+        #fnedit-remove# print(" Warning: {0}".format(warning_count))
+        print(" Failed:  {0}".format(failed_count))
+        print(" Log File: {0}".format(log_path))
         print("="*80)
 
 class LogParser(object):
@@ -123,10 +138,10 @@ class LogParser(object):
         self.cache = {} 
         self.lock = threading.Lock()
 
-    def get_latest_succeed_info(self, db, schema, partition):
+    def get_latest_succeed_info(self, db, schema, table):
         if self.succeed_base_path is None:
             self.logger.warning("[LogParser] succeed_path is not defined in env_config.txt")
-            return None, "succeed_path not configured"
+            return None, "succeed_path is not configured"
         cache_key = "{0}_{1}".format(db, schema)
         
         with self.lock:
@@ -134,10 +149,10 @@ class LogParser(object):
                 self.logger.info("[LogParser] Building memory cache for DB: {0}, Schema: {1} ...".format(db, schema))
                 self.cache[cache_key] = {}
                 
-                search_pattern = os.path.join(self.succeed_base_path, db, "*", "offloadgp_stat_succeeded.{0}.csv".format(schema))
-                self.logger.info("[LogParser] Searching for succeed log using pattern: {0}".format(search_pattern))
+                search_pattern = os.path.join(self.succeed_base_path, db, "*", "offloadgp_stat.{0}.csv".format(schema))
+                self.logger.info("[LogParser] Searching for log using pattern: {0}".format(search_pattern))
                 matched_files = sorted(glob.glob(search_pattern), reverse=True)
-
+                
                 if not matched_files:
                     self.logger.warning("[LogParser] Log files not found for pattern: {0}".format(search_pattern))
                 else:
@@ -156,34 +171,36 @@ class LogParser(object):
                                 reader = csv.DictReader(f, fieldnames=expected_fields)
                                 for row in reader:
                                     gp_tbl = row.get('Greenplum_Tbl', '')
-                                    status = row.get('Run_Status', '')
+                                    new_end_ts = row.get('End_Timestamp_Script', '')
 
                                     if gp_tbl == 'Greenplum_Tbl':
                                         continue
                                     
-                                    if gp_tbl and status == 'SUCCEEDED':
-                                        if gp_tbl not in self.cache[cache_key]:
+                                    if gp_tbl:
+                                        prev = self.cache[cache_key].get(gp_tbl)
+                                        if prev is None or new_end_ts > prev.get('End_Timestamp_Script', ''):
                                             self.cache[cache_key][gp_tbl] = row
-                                        else:
-                                            current_ts = self.cache[cache_key][gp_tbl].get('End_Timestamp_Script', '')
-                                            new_ts = row.get('End_Timestamp_Script', '')
-                                            if new_ts > current_ts:
-                                                self.cache[cache_key][gp_tbl] = row
+                                            
                         except Exception as e:
                             self.logger.warning("[LogParser] Error parsing log file {0}: {1}".format(log_file, e))
                 self.logger.info("[LogParser] Cache build completed. Total {0} tables cached.".format(len(self.cache[cache_key])))
 
         # Check partition/table name against cache
-        target_table_with_schema = "{0}.{1}".format(schema, partition)
-        latest_row = self.cache[cache_key].get(partition) or self.cache[cache_key].get(target_table_with_schema)
+        target_table_with_schema = "{0}.{1}".format(schema, table)
+        latest_row = self.cache[cache_key].get(table) or self.cache[cache_key].get(target_table_with_schema)
         
         if latest_row:
-            self.logger.info("[LogParser] Found latest SUCCEEDED record for {0} from Cache.".format(partition))
-            return latest_row, "Found SUCCEEDED record"
+            latest_status = latest_row.get('Run_Status', '').upper()
+            if latest_status == 'SUCCEEDED':
+                self.logger.info("[LogParser] Found latest Export status = SUCCEEDED for {0} from Cache.".format(table))
+                return latest_status, "Found latest Export Status = SUCCEEDED"
+            else:
+                self.logger.warning("[LogParser] Latest status of table: {0} is not SUCCEEDED (status = {1})".format(table, latest_status))
+                return None, "Latest Export status is not SUCCEEDED"
         else:
-            self.logger.warning("[LogParser] Status is not SUCCEEDED in cache for {0}".format(partition))
-            return None, "Status is not SUCCEEDED in any log files"
-
+            self.logger.warning("[LogParser] Not found any Export Status of table: {0}".format(table))
+            return None, "Not found any Export Status"
+    
 def setup_logging(log_dir, log_name="app", date_folder=None, timestamp=None):
     if date_folder:
         log_dir = os.path.join(log_dir, date_folder)
@@ -216,7 +233,10 @@ def peek_env_config(env_path, key_to_find):
             with open(env_path, 'r') as f:
                 for line in f:
                     line = line.strip()
-                    if not line or line.startswith('#'): continue
+                    # skip Header
+                    if not line or line.startswith('#'):
+                        continue
+                    
                     if '=' in line:
                         k, v = line.split('=', 1)
                         if k.strip() == key_to_find:
@@ -230,7 +250,7 @@ def peek_env_config(env_path, key_to_find):
 # ==============================================================================
 
 class Config(object):
-    def __init__(self, env_config_path, list_file_path, cli_tables, logger, date_folder = None, main_path=None):
+    def __init__(self, env_config_path, list_file_path, cli_tables, logger, global_ts, run_id, date_folder=None, main_path=None):
         self.logger = logger
         
         # 1. Load Environment Config
@@ -246,6 +266,8 @@ class Config(object):
         self.thai_mapping_export_path = ''
         self.thai_dict = {}
         self.succeed_path = None
+        self.global_ts = global_ts
+        self.run_id = run_id
 
         # Default Number Configurations
         self.env_params = {
@@ -259,7 +281,9 @@ class Config(object):
             with open(env_config_path, 'r') as f:
                 for line in f:
                     line = line.strip()
-                    if not line or line.startswith('#'): continue
+                    # skip Header
+                    if not line or line.startswith('#'):
+                        continue
 
                     if '=' in line:
                         key, value = line.split('=', 1)
@@ -280,13 +304,36 @@ class Config(object):
                             self.env_params[key] = int(value)
                 
             # Create temp dir if not exists
-            if self.local_temp_dir:
+            if self.local_temp_dir is None:
+                self.logger.error("local_temp_dir is not defined in env_config.txt")
+                raise
+            else:
                 self.local_temp_dir = os.path.join(self.local_temp_dir, date_folder)
                 if not os.path.exists(self.local_temp_dir):
                     os.makedirs(self.local_temp_dir)
 
-            if self.nas_dest_base:
+            # Create output destination dir if not exists
+            if self.nas_dest_base is None:
+                self.logger.error("nas_destination is not defined in env_config.txt")
+                raise
+            else:
                 self.nas_dest_base = os.path.join(self.nas_dest_base, date_folder)
+            
+            if self.log_dir is None:
+                self.logger.error("log_dir is not defined in env_config.txt")
+                raise
+            if self.metadata_base_dir is None:
+                self.logger.error("metadata_base_dir is not defined in env_config.txt")
+                raise
+            if self.gp_db is None:
+                self.logger.error("gp_db is not defined in env_config.txt")
+                raise
+            if self.thai_mapping_table is None:
+                self.logger.error("thai_mapping_table is not defined in env_config.txt")
+                raise
+            if self.succeed_path is None:
+                self.logger.error("succeed_path is not defined in env_config.txt")
+                raise
             
             self.logger.info("Resolved local_temp_dir: {0}".format(self.local_temp_dir))
             self.logger.info("Resolved nas_dest_base: {0}".format(self.nas_dest_base))
@@ -307,40 +354,72 @@ class Config(object):
                     self.type_mapping = json.load(f)
             except Exception as e:
                 self.logger.error("Failed to parse mapping file: {0}. Using empty map.".format(e))
+            
+            # Check if datatype repeats in more than 1 method
+            repeat_data_type = (
+                (set(self.type_mapping['SUM_MIN_MAX']) & set(self.type_mapping['MIN_MAX'])) |
+                (set(self.type_mapping['SUM_MIN_MAX']) & set(self.type_mapping['MD5_MIN_MAX'])) |
+                (set(self.type_mapping['MIN_MAX']) & set(self.type_mapping['MD5_MIN_MAX']))
+                )
+            if repeat_data_type:
+                str_repeat_data_type = ", ".join(sorted(repeat_data_type))
+                self.logger.error("Mapping file has repeat datatype: '{0}' in many method.".format(str_repeat_data_type))
+                raise
+            
         else:
             self.logger.warning("Mapping file not found or path not defined: {0}".format(self.mapping_file_path))
 
         # 2. Determine Execution List
         self.execution_list = []
         if cli_tables:
+            # Case 1: Use CLI Arguments
             self.logger.info("Using CLI arguments for table list.")
+            # Expect format: DB|Schema.Table,DB2|Schema.Table
             tables = cli_tables.split(',')
             for t in tables:
                 try:
+                    # Parse DB|Schema.Table
                     db_part, tbl_part = t.split('|')
                     sch_part, real_tbl = tbl_part.split('.')
-                    self.execution_list.append({
-                        'db': db_part.strip(),
-                        'schema': sch_part.strip(),
-                        'table': real_tbl.strip()
-                    })
+                    
+                    if db_part and sch_part and real_tbl:
+                        self.execution_list.append({
+                            'db': db_part.strip(),
+                            'schema': sch_part.strip(),
+                            'table': real_tbl.strip()
+                        })
+                    else:
+                        self.logger.warning("Invalid format in argument: {0}. Expected DB|Schema.Table".format(t))
+                        continue
+                        
                 except ValueError:
-                    self.logger.error("Invalid format in argument: {0}. Expected DB|Schema.Table".format(t))
+                    self.logger.warning("Invalid format in argument: {0}. Expected DB|Schema.Table".format(t))
         else:
+            # Case 2: Use List File
             self.logger.info("Using list file: {0}".format(list_file_path))
             try:
                 with open(list_file_path, 'r') as f:
                     for line in f:
                         line = line.strip()
-                        if not line or line.startswith('#'): continue
+                        # skip Header
+                        if not line or line.startswith('#'):
+                            continue
+                        
                         try:
+                            # Format: DB|Schema.Table
                             db_part, tbl_part = line.split('|')
                             sch_part, real_tbl = tbl_part.split('.')
-                            self.execution_list.append({
-                                'db': db_part.strip(),
-                                'schema': sch_part.strip(),
-                                'table': real_tbl.strip()
-                            })
+                            
+                            if db_part and sch_part and real_tbl:
+                                self.execution_list.append({
+                                    'db': db_part.strip(),
+                                    'schema': sch_part.strip(),
+                                    'table': real_tbl.strip()
+                                })
+                            else:
+                                self.logger.warning("Skipping invalid line in list file: {0}".format(line))
+                                continue
+                            
                         except ValueError:
                             self.logger.warning("Skipping invalid line in list file: {0}".format(line))
             except Exception as e:
@@ -358,40 +437,69 @@ class Config(object):
                 reader = csv.reader(f, delimiter='|')
                 for line in reader:
                     # Format: DB | SCHEMA | table | manual_num_col
-                    if len(line) < 4: continue
+                    if len(line) < 4:
+                        continue
                     db, sch, tbl, m_num = [x.strip() for x in line[:4]]
-                    key = (db, sch, tbl)
+                    key = (db.strip().lower(), sch.strip().lower(), tbl.strip().lower())
                     self.master_data[key] = {
                         'manual_num': [x.strip().lower() for x in m_num.split(',') if x.strip().lower() != 'none' and x.strip()]
                     }
             self.logger.info("Loaded {0} tables from master config.".format(len(self.master_data)))
         except Exception as e:
-            self.logger.error("Failed to load master config: {0}".format(e))
+            if not self.config_master_file_path or not os.path.exists(self.config_master_file_path):
+                self.logger.error("Master config path not defined or not found: %r" % self.config_master_file_path)
+            else:
+                self.logger.error("Failed to load master config: {0}".format(e))
             raise
 
     def _export_thai_mapping(self):
         target_tables = set(["{0}.{1}".format(t['schema'], t['table']) for t in self.execution_list])
+        thai_mapping_export_filenm = "thai_mapping_export_{0}_{1}.csv".format(self.global_ts, self.run_id)
+        self.thai_mapping_export_full_path = os.path.join(self.thai_mapping_export_path, thai_mapping_export_filenm)
         if not target_tables: return
         
         in_clause = ",".join(["'{0}'".format(tbl) for tbl in target_tables])
-        sql_query = "\\copy (SELECT database_name, original_table_name, th_column_name, active_flag FROM {0} WHERE original_table_name IN ({1})) TO '{2}' WITH CSV HEADER;".format(
-            self.thai_mapping_table, in_clause, self.thai_mapping_export_path)
+        sql_query = "\\copy ( SELECT database_name, original_table_name, th_column_name, COALESCE(active_flag,'Y') active_flag FROM {0} WHERE original_table_name IN ({1}) ) TO '{2}' WITH CSV HEADER;".format(self.thai_mapping_table, in_clause, self.thai_mapping_export_full_path)
         
-        self.logger.info("Generated SQL for Thai Mapping: {0}".format(sql_query))
-        cmd = ['psql', '-d', self.gp_db, '-c', sql_query]
+        filename = "query_export_thai_mapping_{0}.sql".format(self.global_ts)
+        filepath = os.path.join(self.local_temp_dir, filename)
+
+        with open(filepath, 'w') as f:
+            f.write(sql_query)
+            f.write("\n")
+        
+        self.logger.info("Generated SQL for Thai Mapping: {0}".format(filepath))
+        cmd = ['psql', '-v', 'ON_ERROR_STOP=1', '-d', self.gp_db, '-f', filepath]
+        self.logger.info("Executing PSQL... (DB: {0}) -> Output: {1}".format(self.gp_db, self.thai_mapping_export_full_path))
+        self.logger.info("{0}".format(" ".join(cmd)))
         
         try:
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             stdout, stderr = process.communicate()
+            
+            try:
+                stderr_text = stderr.decode('utf-8')
+            except Exception:
+                stderr_text = str(stderr)
+                
             if process.returncode != 0:
-                self.logger.error("psql export failed: {0}".format(stderr))
+                err_msg = "PSQL execution failed (Return Code: {0}) Error: {1}".format(process.returncode, stderr_text)
+                self.logger.error(err_msg)
+                raise RuntimeError(err_msg)
+            if not (os.path.exists(self.thai_mapping_export_full_path) and os.path.getsize(self.thai_mapping_export_full_path) > 0):
+                err_msg = "PSQL executed but output file missing or empty: {0} Error: {1}".format(self.thai_mapping_export_full_path, stderr_text)
+                self.logger.error(err_msg)
+                raise RuntimeError(err_msg)
+            
         except Exception as e:
-            self.logger.error("Failed to execute psql subprocess: {0}".format(e))
+            err_msg = "Unexpected error when running psql: {0}".format(e).replace("\n", " ")
+            self.logger.error(err_msg)
+            raise RuntimeError(err_msg)
 
     def _load_thai_mapping(self):
-        if not os.path.exists(self.thai_mapping_export_path): return
+        if not os.path.exists(self.thai_mapping_export_full_path): return
         try:
-            with open(self.thai_mapping_export_path, 'r') as f:
+            with open(self.thai_mapping_export_full_path, 'r') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     db = row.get('database_name', '').strip().lower()
@@ -451,12 +559,6 @@ class QueryBuilder(object):
             all_date_cols = set(categorized_cols['MIN_MAX'])
             all_cpx_cols = set(categorized_cols['MD5_MIN_MAX'])
 
-            for col in all_num_cols:
-                all_date_cols.discard(col)
-                all_cpx_cols.discard(col)
-            for col in all_date_cols:
-                all_cpx_cols.discard(col)
-
             num_fragments = []
             date_fragments = []
             cpx_fragments = []
@@ -475,7 +577,8 @@ class QueryBuilder(object):
             # 2. DATE Solution
             for col in sorted(all_date_cols):
                 base_expr = insert_logic_dict.get(col, '"{0}"'.format(col))
-                min_expr, max_expr = "MIN({0})::text".format(base_expr), "MAX({0})::text".format(base_expr)
+                min_expr = "MIN({0})::text".format(base_expr)
+                max_expr = "MAX({0})::text".format(base_expr)
                 frag = "'\"{0}\": {{' || '\"min\": ' || {1} || ', \"max\": ' || {2} || '}}'".format(
                     col, self._quote_json_val(min_expr), self._quote_json_val(max_expr))
                 date_fragments.append(frag)
@@ -504,6 +607,7 @@ class QueryBuilder(object):
             sql = (
                 "SELECT '{{' || "
                 " '\"table\": \"{0}\", ' || "
+                " '\"source_type\": \"greenplum\", ' || "
                 " '\"count\": ' || COUNT(*)::text || ', ' || "
                 " '\"methods\": {{' || {1} || '}}' || "
                 " '}}' "
@@ -515,8 +619,9 @@ class QueryBuilder(object):
 
             with open(filepath, 'w') as f:
                 f.write(sql)
+                f.write("\n")
 
-            return sql
+            return filepath
         
         except Exception as e:
             self.logger.error("Error building JSON query: {0}".format(e))
@@ -526,21 +631,37 @@ class ShellHandler(object):
     def __init__(self, logger):
         self.logger = logger
 
-    def run_psql(self, sql, output_path, db_name=None):
-        cmd = ['psql', '-A', '-t', '-c', sql, '-o', output_path]
+    def run_psql(self, sql_file, output_path, db_name=None):
+        cmd = ['psql', '-v', 'ON_ERROR_STOP=1', '-q', '-t', '-A']
 
-        if db_name: cmd.extend(['-d', db_name])
+        if db_name:
+            cmd.extend(['-d', db_name])
+        cmd.extend(['-f', sql_file, '-o', output_path])
 
         self.logger.info("Executing PSQL... (DB: {0}) -> Output: {1}".format(db_name or 'Default', output_path))
+        self.logger.info("{0}".format(" ".join(cmd)))
         try:
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             stdout, stderr = process.communicate()
+            
+            try:
+                stderr_text = stderr.decode('utf-8')
+            except Exception:
+                stderr_text = str(stderr)
+                
             if process.returncode != 0:
-                raise RuntimeError("PSQL execution failed. RC: {0}. Error: {1}".format(process.returncode, stderr))
+                err_msg = "PSQL execution failed (Return Code: {0}) Error: {1}".format(process.returncode, stderr_text)
+                self.logger.error(err_msg)
+                raise RuntimeError(err_msg)
             if not (os.path.exists(output_path) and os.path.getsize(output_path) > 0):
-                self.logger.warning("PSQL Executed but output file is missing or 0 bytes: {0}".format(output_path))
+                err_msg = "PSQL executed but output file missing or empty: {0} Error: {1}".format(output_path, stderr_text)
+                self.logger.error(err_msg)
+                raise RuntimeError(err_msg)
+            
         except Exception as e:
-            raise
+            err_msg = "Unexpected error when running psql: {0}".format(e).replace("\n", " ")
+            self.logger.error(err_msg)
+            raise RuntimeError(err_msg)
 
 class FileHandler(object):
     def __init__(self, logger):
@@ -559,7 +680,7 @@ class FileHandler(object):
 # ==============================================================================
 
 class Worker(threading.Thread):
-    def __init__(self, thread_id, job_queue, config, builder, shell, file_h, log_parser, tracker, logger, global_ts):
+    def __init__(self, thread_id, job_queue, config, builder, shell, file_h, log_parser, tracker, logger, global_ts, status_file_filenm, status_file_locks, status_file_locks_lock):
         threading.Thread.__init__(self)
         self.thread_id = thread_id
         self.name = "Worker-{0:02d}".format(thread_id)
@@ -573,8 +694,21 @@ class Worker(threading.Thread):
         self.logger = logger
         self.global_ts = global_ts
         self.daemon = True
+        
+        # csv file name
+        self.status_file_filenm = status_file_filenm
+        self.status_file_locks = status_file_locks
+        self.status_file_locks_lock = status_file_locks_lock
+        
+        # pre-defined logging info
+        self.start_time_tbl = None
+        self.start_ts_tbl = None
+        self.short_name = ""
+        self.reconcile_method = []
+        self.status = ""
+        self.error_message = ""
 
-    def _get_latest_metadata(self, db_name, table_name):
+    def _get_latest_metadata(self, db_name, schema_table):
         """Scans metadata_base_dir for the latest data_type and insert_logic files"""
         if not self.config.metadata_base_dir or not os.path.exists(self.config.metadata_base_dir):
             return None, None
@@ -590,14 +724,123 @@ class Worker(threading.Thread):
         # Walk through directories to find the most recent file
         for root, _, files in os.walk(target_dir):
             for file in files:
-                if file.endswith("_data_type.txt") and table_name in file:
+                if file.endswith("_data_type.txt") and schema_table in file:
                     matches_dt.append(os.path.join(root, file))
-                elif file.endswith("_insert_logic.txt") and table_name in file:
+                elif file.endswith("_insert_logic.txt") and schema_table in file:
                     matches_il.append(os.path.join(root, file))
                     
         latest_dt = sorted(matches_dt)[-1] if matches_dt else None
         latest_il = sorted(matches_il)[-1] if matches_il else None
         return latest_dt, latest_il
+
+    def _check_manual_num(self, master_info, dt_file):
+        self.logger.info("DEBUG: master_info = {0}".format(master_info))
+        mapping = {}
+        new_master_info = {'manual_num': []}
+        manual_num_err = []
+        with open(dt_file) as f:
+            reader = csv.DictReader(f, delimiter="|")
+            for row in reader:
+                col_raw = row.get('gp_column_nm', '')
+                dt = row.get('gp_datatype', '')
+                if col_raw and dt:
+                    mapping[col_raw.strip().lower()] = dt.strip().lower()
+                
+        for col in master_info.get('manual_num', []):
+            lookup_col = col.strip().lower()
+            datatype = mapping.get(lookup_col)
+            if datatype is None:
+                err_msg = "Column: {0} is not found in data type file".format(col)
+                self.logger.error("[{0}] {1}".format(self.short_name, err_msg))
+                manual_num_err.append(err_msg)
+                continue
+            
+            if datatype in ['bigint', 'integer']:
+                new_master_info['manual_num'].append(col)
+            else:
+                err_msg = "Column: {0} is NOT bigint or integer (data type = {1})".format(col, datatype)
+                self.logger.error("[{0}] {1}".format(self.short_name, err_msg))
+                manual_num_err.append(err_msg)
+                
+        self.logger.info("DEBUG: new_master_info = {0}".format(new_master_info))
+        return new_master_info, manual_num_err
+
+    def logging_status(self):
+        # Define Temp target directory and file path
+        base_log_dir = self.config.local_temp_dir
+
+        # temp status directory: <temp>/<date>/stat_csv/<db>/<schema>
+        status_dir = os.path.join(base_log_dir, 'stat_csv', self.db, self.schema)
+
+        if not os.path.exists(status_dir):
+            try:
+                os.makedirs(status_dir)
+            except Exception as e:
+                self.logger.error("Cannot create status directory {0}: {1}".format(status_dir, e))
+
+        status_file_full_path = os.path.join(status_dir, self.status_file_filenm)
+
+        # Acquire or create a per-file lock (shared across all workers)
+        with self.status_file_locks_lock:
+            lock = self.status_file_locks.get(status_file_full_path)
+            if lock is None:
+                lock = threading.Lock()
+                self.status_file_locks[status_file_full_path] = lock
+
+        # Ensure required attributes exist
+        short_name = getattr(self, "short_name", "")
+        start_ts_tbl = getattr(self, "start_ts_tbl", "")
+        start_time_tbl = getattr(self, "start_time_tbl", None)
+        status = getattr(self, "status", "")
+        error_message = getattr(self, "error_message", "")
+        reconcile_method = getattr(self, "reconcile_method", [])
+        json_output_path = getattr(self, "json_output_path_file", "")
+
+        # Prepare timing
+        end_time_tbl = time.time()
+        end_ts_tbl = datetime.fromtimestamp(end_time_tbl).strftime("%Y-%m-%d %H:%M:%S")
+        if start_time_tbl is None:
+            duration_seconds = 0
+        else:
+            duration_seconds = int(end_time_tbl - start_time_tbl)
+
+        # Format duration as HH:MM:SS
+        hours, rem = divmod(duration_seconds, 3600)
+        minutes, seconds = divmod(rem, 60)
+        duration_tbl = "{:02}:{:02}:{:02}".format(hours, minutes, seconds)
+
+        # Reconcile method string
+        reconcile_method_str = ",".join(set(reconcile_method)) if reconcile_method else ""
+
+        row = [
+            short_name,
+            start_ts_tbl,
+            end_ts_tbl,
+            duration_tbl,
+            reconcile_method_str,
+            status,
+            error_message,
+            json_output_path,
+            ""  # remark
+        ]
+        row = [s.encode('utf-8') if isinstance(s, unicode) else str(s) for s in row]
+        
+        # thread-safe write using per-file lock
+        with lock:
+            f = None
+            try:
+                f = open(status_file_full_path, "a")
+                writer = csv.writer(f, quoting=csv.QUOTE_ALL)
+                writer.writerow(row)
+                f.flush()
+            except Exception as e:
+                self.logger.error("Failed to write status CSV {0} for {1}: {2}".format(status_file_full_path, short_name, e))
+            finally:
+                try:
+                    if f:
+                        f.close()
+                except Exception:
+                    pass
 
     def run(self):
         max_retries = 1
@@ -609,87 +852,154 @@ class Worker(threading.Thread):
                 self.tracker.update_worker_status(self.name, "[IDLE] Finished")
                 break
 
-            db, schema, table = task['db'], task['schema'], task['table']
-            full_name, short_name = "{0}.{1}.{2}".format(db, schema, table), "{0}.{1}".format(schema, table)
+            self.db = task['db'].strip().lower()
+            self.schema = task['schema'].strip().lower()
+            table = task['table'].strip().lower()
+            full_name = "{0}.{1}.{2}".format(self.db, self.schema, table)
+            # pre-defined logging info
+            self.short_name = "{0}.{1}".format(self.schema, table)
+            self.start_time_tbl = time.time()
+            self.start_ts_tbl = datetime.fromtimestamp(self.start_time_tbl).strftime("%Y-%m-%d %H:%M:%S")
+            self.reconcile_method = ['count']
             
             for attempt in range(1, max_retries + 1):
                 try:
-                    self.tracker.update_worker_status(self.name, "[BUSY] {0} (Attempt {1})".format(short_name, attempt))
+                    self.tracker.update_worker_status(self.name, "[BUSY] {0} (Attempt {1})".format(self.short_name, attempt))
                     self.logger.info("Worker {0} started processing table: {1} (Attempt {2})".format(self.name, full_name, attempt))
                     start_t = time.time()
 
-                    # Step 1: Check Succeed Log
-                    log_row, log_msg = self.log_parser.get_latest_succeed_info(db, schema, table)
+                    # Step 1: Check Log
+                    log_row, log_msg = self.log_parser.get_latest_succeed_info(self.db, self.schema, table)
                     if not log_row:
-                        raise ValueError("SKIPPED: " + log_msg)
+                        raise ValueError("WARNING: " + log_msg)
 
                     # Step 2: Config and Metadata
-                    master_info = self.config.master_data.get((db, schema, table), {'manual_num': []})
-                    thai_config = self.config.thai_dict.get((db.lower(), table.lower()), {})
-                    dt_file, il_file = self._get_latest_metadata(db, table)
+                    pre_master_info = self.config.master_data.get((self.db, self.schema, table), {'manual_num': []})
+                    thai_config = self.config.thai_dict.get((self.db, table), {})
+                    dt_file, il_file = self._get_latest_metadata(self.db, self.short_name)
+                    self.logger.info("")
+                    self.logger.info("Data type file: {0}".format(dt_file))
+                    self.logger.info("Insert Logic file: {0}".format(il_file))
+                    self.logger.info("")
                     missing_flag = False if dt_file else True
 
-                    # Parse Logic
-                    insert_logic_dict = {}
-                    if il_file:
-                        with open(il_file, 'r') as f:
-                            cur_col = None
-                            for line in f.read().splitlines():
-                                if not line.strip() or line == "gp_column_nm;insert_logic": continue
-                                m = re.match(r'^([a-zA-Z0-9_]+);(.*)', line)
-                                if m: cur_col = m.group(1); insert_logic_dict[cur_col] = m.group(2)
-                                elif cur_col: insert_logic_dict[cur_col] += " " + line
+                    if missing_flag:
+                        self.status = "FAILED"
+                        self.error_message = "Not found data type file"
+                        self.logger.error(self.error_message)
+                        self.tracker.add_result(full_name, self.status, self.error_message)
+                        break
+                    else:
+                        # Check manual_num column
+                        master_info, manual_num_err = self._check_manual_num(pre_master_info, dt_file)
+                        # Parse Logic
+                        insert_logic_dict = {}
+                        if il_file:
+                            with open(il_file, 'r') as f:
+                                cur_col = None
+                                for line in f.read().splitlines():
+                                    # skip Header
+                                    if not line.strip() or line == "gp_column_nm;insert_logic":
+                                        continue
+                                    
+                                    # match "column_name;logic"
+                                    m = re.match(r'^([a-zA-Z0-9_]+);(.*)', line)
+                                    if m:
+                                        cur_col = m.group(1).strip().lower()
+                                        insert_logic_dict[cur_col] = m.group(2)
+                                    elif cur_col:
+                                        insert_logic_dict[cur_col] += " " + line
+                            
+                            for col in insert_logic_dict:
+                                logic = insert_logic_dict[col].replace('\\n', ' ').replace('\n', ' ')
+                                insert_logic_dict[col] = re.sub(r'(?i)\s+AS\s+"?[a-zA-Z0-9_]+"?(?:\s*)$', '', logic).strip()
                         
-                        for col in insert_logic_dict:
-                            logic = insert_logic_dict[col].replace('\\n', ' ').replace('\n', ' ')
-                            insert_logic_dict[col] = re.sub(r'(?i)\s+AS\s+"?[a-zA-Z0-9_]+"?(?:\s*)$', '', logic).strip()
-                    
-                    # Categorize
-                    cat_cols = {'SUM_MIN_MAX': [], 'MIN_MAX': [], 'MD5_MIN_MAX': [], 'TYPE_MAP': {}, 'MANUAL_NUM': master_info['manual_num']}
-                    if dt_file:
-                        with open(dt_file, 'r') as f:
-                            reader = csv.DictReader(f, delimiter='|')
-                            for row in reader:
-                                col_nm, gp_dt = row.get('gp_column_nm', '').strip(), row.get('gp_datatype', '').strip()
-                                if col_nm and gp_dt:
-                                    cat_cols['TYPE_MAP'][col_nm] = gp_dt
-                                    gp_base = gp_dt.split('(')[0].strip().lower()
-                                    t_flag = thai_config.get(col_nm.lower())
-                                    if t_flag == 'Y': gp_base = 'thai_col_flag_y'
-                                    elif t_flag == 'N': gp_base = 'thai_col_flag_n'
-                                    if gp_base in self.config.type_mapping.get("SUM_MIN_MAX", []): cat_cols['SUM_MIN_MAX'].append(col_nm)
-                                    elif gp_base in self.config.type_mapping.get("MIN_MAX", []): cat_cols['MIN_MAX'].append(col_nm)
-                                    elif gp_base in self.config.type_mapping.get("MD5_MIN_MAX", []): cat_cols['MD5_MIN_MAX'].append(col_nm)
+                        # Categorize
+                        cat_cols = {'SUM_MIN_MAX': [], 'MIN_MAX': [], 'MD5_MIN_MAX': [], 'TYPE_MAP': {}, 'MANUAL_NUM': master_info['manual_num']}
+                        if dt_file:
+                            with open(dt_file, 'r') as f:
+                                reader = csv.DictReader(f, delimiter='|')
+                                for row in reader:
+                                    col_nm = row.get('gp_column_nm', '').strip().lower()
+                                    gp_dt = row.get('gp_datatype', '').strip()
+                                    
+                                    if col_nm and gp_dt:
+                                        cat_cols['TYPE_MAP'][col_nm] = gp_dt
+                                        gp_base = gp_dt.split('(')[0].strip().lower()
+                                        t_flag = thai_config.get(col_nm.lower())
 
-                    sql = self.builder.build_json_query(db, schema, table, cat_cols, insert_logic_dict)
-                    local_path = os.path.join(self.config.local_temp_dir, "gp_{0}_{1}_{2}_{3}.json".format(db, schema, table, self.global_ts))
-                    
-                    self.shell.run_psql(sql, local_path, db)
-                    self.file_h.copy_to_nas(local_path, os.path.join(self.config.nas_dest_base, db, schema))
+                                        if t_flag == 'Y':
+                                            gp_base = 'thai_col_flag_y'
+                                        elif t_flag == 'N':
+                                            gp_base = 'thai_col_flag_n'
+                                            
+                                        sum_map = [x.strip().lower() for x in self.config.type_mapping.get("SUM_MIN_MAX", [])]
+                                        min_map = [x.strip().lower() for x in self.config.type_mapping.get("MIN_MAX", [])]
+                                        md5_map = [x.strip().lower() for x in self.config.type_mapping.get("MD5_MIN_MAX", [])]
 
-                    status = "WARNING" if missing_flag else "SUCCESS"
-                    msg = "Metadata file missing" if missing_flag else "-"
-                    self.tracker.add_result(full_name, status, msg)
-                    self.tracker.log_step(full_name, time.time() - start_t)
+                                        if gp_base in sum_map:
+                                            cat_cols['SUM_MIN_MAX'].append(col_nm)
+                                            self.reconcile_method.append('number_sum_min_max')
+                                        elif gp_base in min_map:
+                                            cat_cols['MIN_MAX'].append(col_nm)
+                                            self.reconcile_method.append('dttm_min_max')
+                                        elif gp_base in md5_map:
+                                            cat_cols['MD5_MIN_MAX'].append(col_nm)
+                                            self.reconcile_method.append('md5_min_max')
 
-                    break 
+                        # Call JSON builder and save as .json file
+                        sql_file = self.builder.build_json_query(self.db, self.schema, table, cat_cols, insert_logic_dict)
+                        output_filename = "gp_{0}_{1}_{2}_{3}.json".format(self.db, self.schema, table, self.global_ts)
+                        local_path = os.path.join(self.config.local_temp_dir, output_filename)
+                        json_output_dir = os.path.join(self.config.nas_dest_base, self.db, self.schema)
+                        self.json_output_path_file = os.path.join(json_output_dir, output_filename)
+                        
+                        self.shell.run_psql(sql_file, local_path, self.db)
+                        self.file_h.copy_to_nas(local_path, json_output_dir)
+
+                        if manual_num_err:
+                            self.status = "FAILED"
+                            self.error_message = " , ".join(manual_num_err)
+                        else:
+                            self.status = "SUCCEEDED"
+                            self.error_message = "-"
+                            
+                        self.tracker.add_result(full_name, self.status, self.error_message)
+                        self.tracker.log_step(full_name, time.time() - start_t)
+
+                        break
 
                 except ValueError as ve: 
-                    self.tracker.add_result(full_name, "SKIPPED", str(ve))
+                    self.status = "FAILED"
+                    self.error_message = "{0}".format(ve).replace("\n", " ")
+                    self.logger.error(self.error_message)
+                    self.tracker.add_result(full_name, self.status, self.error_message)
                     break
                     
                 except Exception as outer_e:
+                    self.status = "FAILED"
+                    self.error_message = "{0}".format(outer_e).replace("\n", " ")
                     if attempt < max_retries:
-                        self.logger.warning("Worker {0} Error on attempt {1} for {2}: {3}. Retrying in 3 seconds...".format(self.name, attempt, full_name, outer_e))
-                        time.sleep(3) # พัก 3 วินาทีก่อนเริ่ม Attempt รอบถัดไป
+                        self.logger.warning("Worker {0} Error on attempt {1} for {2}: {3}. Retrying in 3 seconds...".format(self.name, attempt, full_name, self.error_message))
+                        time.sleep(3) # sleep before next attempt
                     else:
-                        self.logger.error("Worker {0} Failed after {1} attempts for {2}: {3}".format(self.name, max_retries, full_name, outer_e))
-                        self.tracker.add_result(full_name, "FAILED", repr(outer_e))
-            
-            self.queue.task_done()
+                        self.logger.error("Worker {0} Failed after {1} attempts for {2}: {3}".format(self.name, max_retries, full_name, self.error_message))
+                        self.tracker.add_result(full_name, self.status, self.error_message)
+                        
+            # After finishing processing, write one CSV line:
+            try:
+                try:
+                    self.logging_status()
+                except Exception as e:
+                    self.logger.error("Failed writing logging_status for {}: {}".format(full_name, e))
+            finally:
+                try:
+                    self.queue.task_done()
+                except Exception:
+                    pass
 
 class MonitorThread(threading.Thread):
-    def __init__(self, tracker, num_workers, log_path):
+    def __init__(self, tracker, num_workers, log_path, run_id):
         threading.Thread.__init__(self)
         self.tracker = tracker
         self.num_workers = num_workers
@@ -697,6 +1007,7 @@ class MonitorThread(threading.Thread):
         self.stop_event = threading.Event()
         self.daemon = True
         self.first_print = True
+        self.run_id = run_id
 
     def stop(self):
         self.stop_event.set()
@@ -713,9 +1024,10 @@ class MonitorThread(threading.Thread):
         elapsed = time.time() - self.tracker.start_time
 
         lines = []
-        lines.append("============================================================")
+        lines.append("================================================================================")
         lines.append(" GREENPLUM EXPORT MONITOR (Python 2.7 Parallel) ")
-        lines.append("============================================================")
+        lines.append("================================================================================")
+        lines.append(" Run ID: {0}".format(self.run_id))
         lines.append(" Progress: {0}/{1} ({2:.2f}%)".format(comp, total, pct))
         lines.append(" Elapsed : {0:.0f}s".format(elapsed))
         lines.append("-" * 60)
@@ -750,13 +1062,16 @@ class GreenplumExportJob(object):
         self.log_path = log_path
         self.global_ts = global_ts
         self.tracker = ProcessTracker(logger)
+        self.run_id = str(uuid.uuid4().hex)
 
         # Init Helpers
-        self.config = Config(args.env, args.list, args.table_name, logger, global_date_folder, main_path)
+        self.config = Config(env_config_path=args.env, list_file_path=args.list, cli_tables=args.table_name, logger=logger, global_ts=self.global_ts, run_id=self.run_id, date_folder=global_date_folder, main_path=main_path)
         self.log_parser = LogParser(self.config.succeed_path, logger)
         self.builder = QueryBuilder(self.config.local_temp_dir, self.config.env_params, logger, self.global_ts)
         self.shell = ShellHandler(logger)
         self.file_h = FileHandler(logger)
+        self.status_file_locks = {}
+        self.status_file_locks_lock = threading.Lock()
 
         # Setup Queue
         self.job_queue = Queue.Queue()
@@ -767,18 +1082,21 @@ class GreenplumExportJob(object):
         self.logger.info("Loaded {0} tasks into queue.".format(len(self.config.execution_list)))
 
     def run(self):
+        input_name = os.path.splitext(os.path.basename(self.args.list))[0]
+        status_file_filenm = "log_stat_rc_{0}_{1}.csv".format(input_name, self.global_ts)
+            
         num_workers = int(self.args.concurrency)
         self.logger.info("Starting {0} workers...".format(num_workers))
 
         workers = []
         # Create & Start Workers
         for i in range(num_workers):
-            w = Worker(i+1, self.job_queue, self.config, self.builder, self.shell, self.file_h, self.log_parser, self.tracker, self.logger, self.global_ts)
+            w = Worker(i+1, self.job_queue, self.config, self.builder, self.shell, self.file_h, self.log_parser, self.tracker, self.logger, self.global_ts, status_file_filenm, self.status_file_locks, self.status_file_locks_lock)
             workers.append(w)
             w.start()
 
         # Start Monitor
-        monitor = MonitorThread(self.tracker, num_workers, self.log_path)
+        monitor = MonitorThread(self.tracker, num_workers, self.log_path, self.run_id)
         monitor.start()
 
         # Wait for Queue to be empty
@@ -797,7 +1115,22 @@ class GreenplumExportJob(object):
         finally:
             monitor.stop()
             monitor.join()
+            
+            # Copy stat file to NAS
+            temp_stat_dir = os.path.join(self.config.local_temp_dir, 'stat_csv')
+            files = glob.glob(os.path.join(temp_stat_dir, '*', '*', status_file_filenm))
+            if files:
+                self.logger.info("")
+                self.logger.info("Start Copy Stat file = {0} file(s) to NAS...".format(len(files)))
+                for f in files:
+                    rel = os.path.relpath(os.path.dirname(f), temp_stat_dir)
+                    dest_path = os.path.join(self.config.nas_dest_base, rel, 'stat_csv')
+                    self.file_h.copy_to_nas(f, dest_path)
+                self.logger.info("Copy Stat file = {0} file(s) to NAS successfully".format(len(files)))
+                self.logger.info("")
+                
             self.tracker.print_summary(self.log_path)
+            
 
 if __name__ == "__main__":
     current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -829,17 +1162,21 @@ if __name__ == "__main__":
     final_log_dir = configured_log_dir if configured_log_dir else os.path.join(main_path, 'log')
 
     logger, log_path = setup_logging(final_log_dir, 'reconcile_query_greenplum', global_date_folder, global_ts)
-    
-    logger.info("============================================================")
+    print(" Log File: {0}".format(log_path))
+    logger.info("================================================================================")
     logger.info("Started with concurrency: {0}".format(args.concurrency))
     logger.info("Resolved env config path: {0}".format(args.env))
     logger.info("Resolved master config path: {0}".format(args.master))
     logger.info("Resolved list file path: {0}".format(args.list))
-    logger.info("============================================================")
+    logger.info("================================================================================")
 
     try:
         job = GreenplumExportJob(args, logger, log_path, global_date_folder, global_ts, main_path)
         job.run()
     except Exception as e:
         logger.critical("Job aborted due to critical error: {0}".format(e))
+        print("")
+        print("End of Script.")
+        print("exit 1")
         sys.exit(1)
+        

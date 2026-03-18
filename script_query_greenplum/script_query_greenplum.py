@@ -74,7 +74,7 @@ class ProcessTracker(object):
         self.logger.info("="*80)
 
         success_count = 0
-        #fnedit-remove# warning_count = 0
+        skipped_count = 0
         failed_count = 0
 
         if not self.results:
@@ -92,7 +92,7 @@ class ProcessTracker(object):
                 if len(r['status']) > max_w_status: max_w_status = len(r['status'])
 
                 if r['status'] == 'SUCCEEDED': success_count += 1
-                #fnedit-remove# elif r['status'] == 'WARNING': warning_count += 1
+                elif r['status'] == 'SKIPPED': skipped_count += 1
                 elif r['status'] == 'FAILED': failed_count += 1
             
             w_table = max_w_table + 2
@@ -112,11 +112,8 @@ class ProcessTracker(object):
                 self.logger.info(row_fmt.format(r['table'], r['status'], r['message'], wt=w_table, ws=w_status))
             
             self.logger.info(sep_line)
-            #fnedit-remove# self.logger.info("Total: {0} | Success: {1} | Warning: {2} | Failed: {3}".format(
-            #fnedit-remove#     len(self.results), success_count, warning_count, failed_count
-            #fnedit-remove# ))
-            self.logger.info("Total: {0} | Success: {1} | Failed: {2}".format(
-                len(self.results), success_count, failed_count
+            self.logger.info("Total: {0} | Success: {1} | Skipped: {2} | Failed: {3}".format(
+                len(self.results), success_count, skipped_count, failed_count
             ))
             self.logger.info("Total Execution Time: {0:.2f}s".format(time.time() - self.start_time))
 
@@ -126,7 +123,7 @@ class ProcessTracker(object):
         print("="*80)
         print(" Total: {0}".format(len(self.results)))
         print(" Success: {0}".format(success_count))
-        #fnedit-remove# print(" Warning: {0}".format(warning_count))
+        print(" Skipped: {0}".format(skipped_count))
         print(" Failed:  {0}".format(failed_count))
         print(" Log File: {0}".format(log_path))
         print("="*80)
@@ -250,7 +247,7 @@ def peek_env_config(env_path, key_to_find):
 # ==============================================================================
 
 class Config(object):
-    def __init__(self, env_config_path, list_file_path, cli_tables, logger, global_ts, run_id, date_folder=None, main_path=None):
+    def __init__(self, env_config_path, master_config_path, list_file_path, cli_tables, logger, global_ts, run_id, date_folder=None, main_path=None):
         self.logger = logger
         
         # 1. Load Environment Config
@@ -259,7 +256,7 @@ class Config(object):
         self.nas_dest_base = os.path.join(main_path, 'output')
         self.log_dir = os.path.join(main_path, 'log')
         self.metadata_base_dir = None
-        self.config_master_file_path = None
+        self.config_master_file_path = master_config_path
         self.mapping_file_path = None
         self.gp_db = ''
         self.thai_mapping_table = ''
@@ -294,7 +291,7 @@ class Config(object):
                         elif key == 'nas_destination': self.nas_dest_base = value
                         elif key == 'log_dir': self.log_dir = value
                         elif key == 'metadata_base_dir': self.metadata_base_dir = value
-                        elif key == 'config_master_file_path': self.config_master_file_path = value
+                        elif key == 'config_master_file_path' and not self.config_master_file_path: self.config_master_file_path = value
                         elif key == 'mapping_file_path': self.mapping_file_path = value
                         elif key == 'gp_db': self.gp_db = value
                         elif key == 'thai_mapping_table': self.thai_mapping_table = value
@@ -305,8 +302,9 @@ class Config(object):
                 
             # Create temp dir if not exists
             if self.local_temp_dir is None:
-                self.logger.error("local_temp_dir is not defined in env_config.txt")
-                raise
+                log_msg = "local_temp_dir is not defined in env_config.txt"
+                self.logger.error(log_msg)
+                raise ValueError("Error: " + log_msg)
             else:
                 self.local_temp_dir = os.path.join(self.local_temp_dir, date_folder)
                 if not os.path.exists(self.local_temp_dir):
@@ -320,20 +318,29 @@ class Config(object):
                 self.nas_dest_base = os.path.join(self.nas_dest_base, date_folder)
             
             if self.log_dir is None:
-                self.logger.error("log_dir is not defined in env_config.txt")
-                raise
+                log_msg = "log_dir is not defined in env_config.txt"
+                self.logger.error(log_msg)
+                raise ValueError("Error: " + log_msg)
             if self.metadata_base_dir is None:
-                self.logger.error("metadata_base_dir is not defined in env_config.txt")
-                raise
+                log_msg = "metadata_base_dir is not defined in env_config.txt"
+                self.logger.error(log_msg)
+                raise ValueError("Error: " + log_msg)
             if self.gp_db is None:
-                self.logger.error("gp_db is not defined in env_config.txt")
-                raise
+                log_msg = "gp_db is not defined in env_config.txt"
+                self.logger.error(log_msg)
+                raise ValueError("Error: " + log_msg)
             if self.thai_mapping_table is None:
-                self.logger.error("thai_mapping_table is not defined in env_config.txt")
-                raise
+                log_msg = "thai_mapping_table is not defined in env_config.txt"
+                self.logger.error(log_msg)
+                raise ValueError("Error: " + log_msg)
             if self.succeed_path is None:
-                self.logger.error("succeed_path is not defined in env_config.txt")
-                raise
+                log_msg = "succeed_path is not defined in env_config.txt"
+                self.logger.error(log_msg)
+                raise ValueError("Error: " + log_msg)
+            if self.config_master_file_path is None:
+                log_msg = "config_master_file_path is not defined in env_config.txt"
+                self.logger.error(log_msg)
+                raise ValueError("Error: " + log_msg)
             
             self.logger.info("Resolved local_temp_dir: {0}".format(self.local_temp_dir))
             self.logger.info("Resolved nas_dest_base: {0}".format(self.nas_dest_base))
@@ -363,8 +370,9 @@ class Config(object):
                 )
             if repeat_data_type:
                 str_repeat_data_type = ", ".join(sorted(repeat_data_type))
-                self.logger.error("Mapping file has repeat datatype: '{0}' in many method.".format(str_repeat_data_type))
-                raise
+                log_msg = "Mapping file has repeat datatype: '{0}' in more than 1 method.".format(str_repeat_data_type)
+                self.logger.error(log_msg)
+                raise ValueError("Error: " + log_msg)
             
         else:
             self.logger.warning("Mapping file not found or path not defined: {0}".format(self.mapping_file_path))
@@ -397,33 +405,39 @@ class Config(object):
         else:
             # Case 2: Use List File
             self.logger.info("Using list file: {0}".format(list_file_path))
-            try:
-                with open(list_file_path, 'r') as f:
-                    for line in f:
-                        line = line.strip()
-                        # skip Header
-                        if not line or line.startswith('#'):
-                            continue
-                        
-                        try:
-                            # Format: DB|Schema.Table
-                            db_part, tbl_part = line.split('|')
-                            sch_part, real_tbl = tbl_part.split('.')
-                            
-                            if db_part and sch_part and real_tbl:
-                                self.execution_list.append({
-                                    'db': db_part.strip(),
-                                    'schema': sch_part.strip(),
-                                    'table': real_tbl.strip()
-                                })
-                            else:
-                                self.logger.warning("Skipping invalid line in list file: {0}".format(line))
+
+            if os.path.exists(list_file_path) and os.path.getsize(list_file_path) > 0:
+                try:
+                    with open(list_file_path, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            # skip Header
+                            if not line or line.startswith('#'):
                                 continue
                             
-                        except ValueError:
-                            self.logger.warning("Skipping invalid line in list file: {0}".format(line))
-            except Exception as e:
-                self.logger.error("Failed to load list file: {0}".format(e))
+                            try:
+                                # Format: DB|Schema.Table
+                                db_part, tbl_part = line.split('|')
+                                sch_part, real_tbl = tbl_part.split('.')
+                                
+                                if db_part and sch_part and real_tbl:
+                                    self.execution_list.append({
+                                        'db': db_part.strip(),
+                                        'schema': sch_part.strip(),
+                                        'table': real_tbl.strip()
+                                    })
+                                else:
+                                    self.logger.warning("Skipping invalid line in list file: {0}".format(line))
+                                    continue
+                                
+                            except ValueError:
+                                self.logger.warning("Skipping invalid line in list file: {0}".format(line))
+                except Exception as e:
+                    self.logger.error("Failed to load list file: {0}".format(e))
+                    raise
+            else:
+                self.logger.error("List file: {0} does not exist or is empty.".format(list_file_path))
+                raise
 
         if self.gp_db and self.thai_mapping_table and self.thai_mapping_export_path:
             self._export_thai_mapping()
@@ -487,7 +501,7 @@ class Config(object):
                 self.logger.error(err_msg)
                 raise RuntimeError(err_msg)
             if not (os.path.exists(self.thai_mapping_export_full_path) and os.path.getsize(self.thai_mapping_export_full_path) > 0):
-                err_msg = "PSQL executed but output file missing or empty: {0} Error: {1}".format(self.thai_mapping_export_full_path, stderr_text)
+                err_msg = "PSQL executed but output file is missing or is empty: {0} Error: {1}".format(self.thai_mapping_export_full_path, stderr_text)
                 self.logger.error(err_msg)
                 raise RuntimeError(err_msg)
             
@@ -570,26 +584,28 @@ class QueryBuilder(object):
                 sum_expr = self._build_num_expr('SUM', base_expr, gp_type)
                 min_expr = self._build_num_expr('MIN', base_expr, gp_type)
                 max_expr = self._build_num_expr('MAX', base_expr, gp_type)
-                frag = "'\"{0}\": {{' || '\"sum\": ' || {1} || ', \"min\": ' || {2} || ', \"max\": ' || {3} || '}}'".format(
-                    col, self._quote_json_val(sum_expr), self._quote_json_val(min_expr), self._quote_json_val(max_expr))
+                frag = "'\"{0}\": {{' || '\"data_type\": \"{1}\", \"sum\": ' || {2} || ', \"min\": ' || {3} || ', \"max\": ' || {4} || '}}'".format(
+                    col, gp_type, self._quote_json_val(sum_expr), self._quote_json_val(min_expr), self._quote_json_val(max_expr))
                 num_fragments.append(frag)
 
             # 2. DATE Solution
             for col in sorted(all_date_cols):
+                gp_type = categorized_cols['TYPE_MAP'].get(col, 'text') #fncheck#
                 base_expr = insert_logic_dict.get(col, '"{0}"'.format(col))
                 min_expr = "MIN({0})::text".format(base_expr)
                 max_expr = "MAX({0})::text".format(base_expr)
-                frag = "'\"{0}\": {{' || '\"min\": ' || {1} || ', \"max\": ' || {2} || '}}'".format(
-                    col, self._quote_json_val(min_expr), self._quote_json_val(max_expr))
+                frag = "'\"{0}\": {{' || '\"data_type\": \"{1}\", \"min\": ' || {2} || ', \"max\": ' || {3} || '}}'".format(
+                    col, gp_type, self._quote_json_val(min_expr), self._quote_json_val(max_expr))
                 date_fragments.append(frag)
 
             # 3. COMPLEX / THAI Solution
             for col in sorted(all_cpx_cols):
+                gp_type = categorized_cols['TYPE_MAP'].get(col, 'text')
                 base_expr = insert_logic_dict.get(col, '"{0}"'.format(col))
                 min_md5 = "MIN(MD5(COALESCE(({0})::text, '')))".format(base_expr)
                 max_md5 = "MAX(MD5(COALESCE(({0})::text, '')))".format(base_expr)
-                frag = "'\"{0}\": {{' || '\"min_md5\": ' || {1} || ', \"max_md5\": ' || {2} || '}}'".format(
-                    col, self._quote_json_val(min_md5), self._quote_json_val(max_md5))
+                frag = "'\"{0}\": {{' || '\"data_type\": \"{1}\", \"min_md5\": ' || {2} || ', \"max_md5\": ' || {3} || '}}'".format(
+                    col, gp_type, self._quote_json_val(min_md5), self._quote_json_val(max_md5))
                 cpx_fragments.append(frag)
 
             method_groups = []
@@ -654,7 +670,7 @@ class ShellHandler(object):
                 self.logger.error(err_msg)
                 raise RuntimeError(err_msg)
             if not (os.path.exists(output_path) and os.path.getsize(output_path) > 0):
-                err_msg = "PSQL executed but output file missing or empty: {0} Error: {1}".format(output_path, stderr_text)
+                err_msg = "PSQL executed but output file is missing or is empty: {0} Error: {1}".format(output_path, stderr_text)
                 self.logger.error(err_msg)
                 raise RuntimeError(err_msg)
             
@@ -706,7 +722,6 @@ class Worker(threading.Thread):
         self.short_name = ""
         self.reconcile_method = []
         self.status = ""
-        self.error_message = ""
 
     def _get_latest_metadata(self, db_name, schema_table):
         """Scans metadata_base_dir for the latest data_type and insert_logic files"""
@@ -863,6 +878,8 @@ class Worker(threading.Thread):
             self.reconcile_method = ['count']
             
             for attempt in range(1, max_retries + 1):
+                # Reset error message for each attempt
+                self.error_message = ""
                 try:
                     self.tracker.update_worker_status(self.name, "[BUSY] {0} (Attempt {1})".format(self.short_name, attempt))
                     self.logger.info("Worker {0} started processing table: {1} (Attempt {2})".format(self.name, full_name, attempt))
@@ -871,7 +888,7 @@ class Worker(threading.Thread):
                     # Step 1: Check Log
                     log_row, log_msg = self.log_parser.get_latest_succeed_info(self.db, self.schema, table)
                     if not log_row:
-                        raise ValueError("WARNING: " + log_msg)
+                        raise ValueError(log_msg)
 
                     # Step 2: Config and Metadata
                     pre_master_info = self.config.master_data.get((self.db, self.schema, table), {'manual_num': []})
@@ -970,7 +987,7 @@ class Worker(threading.Thread):
                         break
 
                 except ValueError as ve: 
-                    self.status = "FAILED"
+                    self.status = "SKIPPED"
                     self.error_message = "{0}".format(ve).replace("\n", " ")
                     self.logger.error(self.error_message)
                     self.tracker.add_result(full_name, self.status, self.error_message)
@@ -978,7 +995,9 @@ class Worker(threading.Thread):
                     
                 except Exception as outer_e:
                     self.status = "FAILED"
-                    self.error_message = "{0}".format(outer_e).replace("\n", " ")
+                    if manual_num_err:
+                        self.error_message = " , ".join(manual_num_err)
+                    self.error_message = "{0} , {1}".format(self.error_message, outer_e).replace("\n", " ")
                     if attempt < max_retries:
                         self.logger.warning("Worker {0} Error on attempt {1} for {2}: {3}. Retrying in 3 seconds...".format(self.name, attempt, full_name, self.error_message))
                         time.sleep(3) # sleep before next attempt
@@ -1065,7 +1084,7 @@ class GreenplumExportJob(object):
         self.run_id = str(uuid.uuid4().hex)
 
         # Init Helpers
-        self.config = Config(env_config_path=args.env, list_file_path=args.list, cli_tables=args.table_name, logger=logger, global_ts=self.global_ts, run_id=self.run_id, date_folder=global_date_folder, main_path=main_path)
+        self.config = Config(env_config_path=args.env, master_config_path=args.master, list_file_path=args.list, cli_tables=args.table_name, logger=logger, global_ts=self.global_ts, run_id=self.run_id, date_folder=global_date_folder, main_path=main_path)
         self.log_parser = LogParser(self.config.succeed_path, logger)
         self.builder = QueryBuilder(self.config.local_temp_dir, self.config.env_params, logger, self.global_ts)
         self.shell = ShellHandler(logger)
@@ -1138,7 +1157,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Greenplum Data Export Tool')
     parser.add_argument('--env', default='env_config.txt', help='Name of env config file')
-    parser.add_argument('--master', default='config_master.txt', help='Name of master config file')
+    parser.add_argument('--master', help='Name of master config file')
     parser.add_argument('--list', default='list_table.txt', help='Name of list of tables file')
     parser.add_argument('--table_name', help='Optional: Specific tables to run (DB|Schema.Table)')
     parser.add_argument('--concurrency', default=4, type=int, help='Number of parallel workers (Default: 4)')
@@ -1151,7 +1170,7 @@ if __name__ == "__main__":
         return os.path.join(base_dir, 'config', input_path)
 
     args.env = resolve_config_path(args.env, main_path)
-    args.master = resolve_config_path(args.master, main_path)
+    if args.master: args.master = resolve_config_path(args.master, main_path)
     args.list = resolve_config_path(args.list, main_path)
 
     run_datetime = datetime.now()
@@ -1160,13 +1179,16 @@ if __name__ == "__main__":
 
     configured_log_dir = peek_env_config(args.env, 'log_dir')
     final_log_dir = configured_log_dir if configured_log_dir else os.path.join(main_path, 'log')
+    
+    configured_master_file_path = peek_env_config(args.env, 'config_master_file_path')
+    final_config_master_file_path = args.master if args.master else configured_master_file_path
 
     logger, log_path = setup_logging(final_log_dir, 'reconcile_query_greenplum', global_date_folder, global_ts)
     print(" Log File: {0}".format(log_path))
     logger.info("================================================================================")
     logger.info("Started with concurrency: {0}".format(args.concurrency))
     logger.info("Resolved env config path: {0}".format(args.env))
-    logger.info("Resolved master config path: {0}".format(args.master))
+    logger.info("Resolved master config path: {0}".format(final_config_master_file_path))
     logger.info("Resolved list file path: {0}".format(args.list))
     logger.info("================================================================================")
 

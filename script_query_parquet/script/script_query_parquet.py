@@ -646,7 +646,6 @@ class Worker(threading.Thread):
         self.daemon = True
 
     def _copy_file_to_nas(self, local_file_path, db, schema, target_file_name):
-        """ Helper method: Copy ไฟล์ไปยัง NAS พร้อมดักจับ Error """
         nas_dir = os.path.join(self.config.nas_destination, db, schema)
         nas_file_path = os.path.join(nas_dir, target_file_name)
 

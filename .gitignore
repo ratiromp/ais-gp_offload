@@ -6,20 +6,14 @@
 
 # 3. เปิดประตู (Un-ignore) โฟลเดอร์ที่เป็นทางผ่าน
 # ต้องไล่เปิดทีละชั้น Git ถึงจะมองเห็นไฟล์ข้างในครับ
-/script_sum_reconcile/log/
 !/script_query_greenplum/
-!/script_sum_reconcile/
-!/script_reconcile_content/
-!/script_sum_reconcile/script/
-!/script_sum_reconcile/config/
-!/script_reconcile_content/script/
-!/script_reconcile_content/config/
-
+!/script_query_parquet/
+!/script_compare_result/
 # 4. (ทางเลือก) สั่ง Ignore ของที่อยู่ในโฟลเดอร์เหล่านั้นทั้งหมดก่อน 
 # เพื่อที่เราจะเลือกเจาะจงเฉพาะไฟล์ในขั้นตอนถัดไป
 /script_query_greenplum/*
-/script_sum_reconcile/script/*
-/script_reconcile_content/script/*
+/script_query_parquet/script/*
+/script_compare_result/script/*
 
 # 5. ยกเว้น (Keep) ไฟล์ที่คุณต้องการจริงๆ
 !/script_query_greenplum/script_query_greenplum.py
@@ -27,10 +21,13 @@
 !/script_query_greenplum/config/data_type_mapping.json
 !/script_query_greenplum/config/env_config.txt
 !/script_query_greenplum/config/list_table.txt
-!/script_sum_reconcile/script/script_sum_reconcile.py
-!/script_reconcile_content/script/script_reconcile_content.py
+!/script_query_parquet/script/script_query_parquet.py
+!/script_query_greenplum/config/env_config.txt
+!/script_compare_result/config/env_config.txt
+!/script_compare_result/script/script_compare_result.py
+
 
 # หากต้องการเก็บไฟล์ทั้งหมดในโฟลเดอร์ config ให้ใช้แบบนี้
 !/script_query_greenplum/config/
-!/script_sum_reconcile/config/
-!/script_reconcile_content/config/
+!/script_query_parquet/config/
+!/script_compare_result/config/

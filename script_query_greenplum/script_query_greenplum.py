@@ -16,6 +16,21 @@
 # 9) remark
 
 
+#-- Input File Pattern --#
+# <database>|<schema>.<table>
+
+#-- Stat File Columns --#
+# 1) greenplum_tbl
+# 2) start_timestamp
+# 3) end_timestamp
+# 4) duration
+# 5) reconcile_method
+# 6) run_status
+# 7) error_message
+# 8) json_output_path
+# 9) remark
+
+
 import sys
 import os
 import csv
@@ -362,19 +377,6 @@ class Config(object):
                     self.type_mapping = json.load(f)
             except Exception as e:
                 self.logger.error("Failed to parse mapping file: {0}. Using empty map.".format(e))
-            
-            # Check if datatype repeats in more than 1 method
-            repeat_data_type = (
-                (set(self.type_mapping['SUM_MIN_MAX']) & set(self.type_mapping['MIN_MAX'])) |
-                (set(self.type_mapping['SUM_MIN_MAX']) & set(self.type_mapping['MD5_MIN_MAX'])) |
-                (set(self.type_mapping['MIN_MAX']) & set(self.type_mapping['MD5_MIN_MAX']))
-                )
-            if repeat_data_type:
-                str_repeat_data_type = ", ".join(sorted(repeat_data_type))
-                log_msg = "Mapping file has repeat datatype: '{0}' in many method.".format(str_repeat_data_type)
-                self.logger.error(log_msg)
-                raise ValueError("Error: " + log_msg)
-            
         else:
             self.logger.warning("Mapping file not found or path not defined: {0}".format(self.mapping_file_path))
 
@@ -406,39 +408,23 @@ class Config(object):
         else:
             # Case 2: Use List File
             self.logger.info("Using list file: {0}".format(list_file_path))
-
-            if os.path.exists(list_file_path) and os.path.getsize(list_file_path) > 0:
-                try:
-                    with open(list_file_path, 'r') as f:
-                        for line in f:
-                            line = line.strip()
-                            # skip Header
-                            if not line or line.startswith('#'):
-                                continue
-                            
-                            try:
-                                # Format: DB|Schema.Table
-                                db_part, tbl_part = line.split('|')
-                                sch_part, real_tbl = tbl_part.split('.')
-
-                                if db_part and sch_part and real_tbl:
-                                    self.execution_list.append({
-                                        'db': db_part.strip(),
-                                        'schema': sch_part.strip(),
-                                        'table': real_tbl.strip()
-                                    })
-                                else:
-                                    self.logger.warning("Skipping invalid line in list file: {0}".format(line))
-                                    continue
-                                
-                            except ValueError:
-                                self.logger.warning("Skipping invalid line in list file: {0}".format(line))
-                except Exception as e:
-                    self.logger.error("Failed to load list file: {0}".format(e))
-                    raise
-            else:
-                self.logger.error("List file: {0} does not exist or empty.".format(list_file_path))
-                raise
+            try:
+                with open(list_file_path, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith('#'): continue
+                        try:
+                            db_part, tbl_part = line.split('|')
+                            sch_part, real_tbl = tbl_part.split('.')
+                            self.execution_list.append({
+                                'db': db_part.strip(),
+                                'schema': sch_part.strip(),
+                                'table': real_tbl.strip()
+                            })
+                        except ValueError:
+                            self.logger.warning("Skipping invalid line in list file: {0}".format(line))
+            except Exception as e:
+                self.logger.error("Failed to load list file: {0}".format(e))
 
         if self.gp_db and self.thai_mapping_table and self.thai_mapping_export_path:
             self._export_thai_mapping()
@@ -498,14 +484,7 @@ class Config(object):
                 stderr_text = str(stderr)
                 
             if process.returncode != 0:
-                err_msg = "PSQL execution failed (Return Code: {0}) Error: {1}".format(process.returncode, stderr_text)
-                self.logger.error(err_msg)
-                raise RuntimeError(err_msg)
-            if not (os.path.exists(self.thai_mapping_export_full_path) and os.path.getsize(self.thai_mapping_export_full_path) > 0):
-                err_msg = "PSQL executed but output file missing or empty: {0} Error: {1}".format(self.thai_mapping_export_full_path, stderr_text)
-                self.logger.error(err_msg)
-                raise RuntimeError(err_msg)
-            
+                self.logger.error("psql export failed: {0}".format(stderr))
         except Exception as e:
             err_msg = "Unexpected error when running psql: {0}".format(e).replace("\n", " ")
             self.logger.error(err_msg)
@@ -585,18 +564,17 @@ class QueryBuilder(object):
                 sum_expr = self._build_num_expr('SUM', base_expr, gp_type)
                 min_expr = self._build_num_expr('MIN', base_expr, gp_type)
                 max_expr = self._build_num_expr('MAX', base_expr, gp_type)
-                frag = "'\"{0}\": {{' || '\"data_type\": \"{1}\" , \"sum\": ' || {2} || ', \"min\": ' || {3} || ', \"max\": ' || {4} || '}}'".format(
-                    col, gp_type ,self._quote_json_val(sum_expr), self._quote_json_val(min_expr), self._quote_json_val(max_expr))
+                frag = "'\"{0}\": {{' || '\"sum\": ' || {1} || ', \"min\": ' || {2} || ', \"max\": ' || {3} || '}}'".format(
+                    col, self._quote_json_val(sum_expr), self._quote_json_val(min_expr), self._quote_json_val(max_expr))
                 num_fragments.append(frag)
 
             # 2. DATE Solution
             for col in sorted(all_date_cols):
                 gp_type = categorized_cols['TYPE_MAP'].get(col, 'text')
                 base_expr = insert_logic_dict.get(col, '"{0}"'.format(col))
-                min_expr = "MIN({0})::text".format(base_expr)
-                max_expr = "MAX({0})::text".format(base_expr)
-                frag = "'\"{0}\": {{' || '\"data_type\": \"{1}\" , \"min\": ' || {2} || ', \"max\": ' || {3} || '}}'".format(
-                    col, gp_type, self._quote_json_val(min_expr), self._quote_json_val(max_expr))
+                min_expr, max_expr = "MIN({0})::text".format(base_expr), "MAX({0})::text".format(base_expr)
+                frag = "'\"{0}\": {{' || '\"min\": ' || {1} || ', \"max\": ' || {2} || '}}'".format(
+                    col, self._quote_json_val(min_expr), self._quote_json_val(max_expr))
                 date_fragments.append(frag)
 
             # 3. COMPLEX / THAI Solution
@@ -605,8 +583,8 @@ class QueryBuilder(object):
                 base_expr = insert_logic_dict.get(col, '"{0}"'.format(col))
                 min_md5 = "MIN(MD5(COALESCE(({0})::text, '')))".format(base_expr)
                 max_md5 = "MAX(MD5(COALESCE(({0})::text, '')))".format(base_expr)
-                frag = "'\"{0}\": {{' || '\"data_type\": \"{1}\" , \"min_md5\": ' || {2} || ', \"max_md5\": ' || {3} || '}}'".format(
-                    col, gp_type, self._quote_json_val(min_md5), self._quote_json_val(max_md5))
+                frag = "'\"{0}\": {{' || '\"min_md5\": ' || {1} || ', \"max_md5\": ' || {2} || '}}'".format(
+                    col, self._quote_json_val(min_md5), self._quote_json_val(max_md5))
                 cpx_fragments.append(frag)
 
             method_groups = []
@@ -671,10 +649,7 @@ class ShellHandler(object):
                 self.logger.error(err_msg)
                 raise RuntimeError(err_msg)
             if not (os.path.exists(output_path) and os.path.getsize(output_path) > 0):
-                err_msg = "PSQL executed but output file missing or empty: {0} Error: {1}".format(output_path, stderr_text)
-                self.logger.error(err_msg)
-                raise RuntimeError(err_msg)
-            
+                self.logger.warning("PSQL Executed but output file is missing or 0 bytes: {0}".format(output_path))
         except Exception as e:
             err_msg = "Unexpected error when running psql: {0}".format(e).replace("\n", " ")
             self.logger.error(err_msg)
@@ -711,21 +686,8 @@ class Worker(threading.Thread):
         self.logger = logger
         self.global_ts = global_ts
         self.daemon = True
-        
-        # csv file name
-        self.status_file_filenm = status_file_filenm
-        self.status_file_locks = status_file_locks
-        self.status_file_locks_lock = status_file_locks_lock
-        
-        # pre-defined logging info
-        self.start_time_tbl = None
-        self.start_ts_tbl = None
-        self.short_name = ""
-        self.reconcile_method = []
-        self.status = ""
-        self.error_message = ""
 
-    def _get_latest_metadata(self, db_name, schema_table):
+    def _get_latest_metadata(self, db_name, table_name):
         """Scans metadata_base_dir for the latest data_type and insert_logic files"""
         if not self.config.metadata_base_dir or not os.path.exists(self.config.metadata_base_dir):
             return None, None
@@ -880,6 +842,8 @@ class Worker(threading.Thread):
             self.reconcile_method = ['count']
             
             for attempt in range(1, max_retries + 1):
+                # Reset error message for each attempt
+                self.error_message = ""
                 try:
                     self.tracker.update_worker_status(self.name, "[BUSY] {0} (Attempt {1})".format(self.short_name, attempt))
                     self.logger.info("Worker {0} started processing table: {1} (Attempt {2})".format(self.name, full_name, attempt))
@@ -994,8 +958,6 @@ class Worker(threading.Thread):
                     break
                     
                 except Exception as outer_e:
-                    self.status = "FAILED"
-                    self.error_message = "{0}".format(outer_e).replace("\n", " ")
                     if attempt < max_retries:
                         self.logger.warning("Worker {0} Error on attempt {1} for {2}: {3}. Retrying in 3 seconds...".format(self.name, attempt, full_name, self.error_message))
                         time.sleep(3) # sleep before next attempt

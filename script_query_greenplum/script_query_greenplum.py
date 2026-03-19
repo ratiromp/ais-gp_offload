@@ -383,7 +383,7 @@ class Config(object):
             # Case 1: Use CLI Arguments
             self.logger.info("Using CLI arguments for table list.")
             # Expect format: DB|Schema.Table,DB2|Schema.Table
-            tables = cli_tables.split(',')
+            tables = cli_tables.lower().split(',')
             for t in tables:
                 try:
                     # Parse DB|Schema.Table
@@ -410,7 +410,7 @@ class Config(object):
                 try:
                     with open(list_file_path, 'r') as f:
                         for line in f:
-                            line = line.strip()
+                            line = line.lower().strip()
                             # skip Header
                             if not line or line.startswith('#'):
                                 continue

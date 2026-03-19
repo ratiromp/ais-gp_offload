@@ -29,9 +29,13 @@ class ProcessTracker(object):
         self.total_task = 0
         self.completed_task = 0
         self.start_time = time.time()
+        self.execution_id = ""
 
     def set_total_task(self, total):
         self.total_task = total
+
+    def set_execution_id(self, exec_id):
+        self.execution_id = exec_id
 
     def update_worker_status(self, worker_name, status):
         self.worker_status[worker_name] = status
@@ -50,27 +54,32 @@ class ProcessTracker(object):
             return self.completed_task, self.total_task
         
     def print_summary(self, log_path, output_dir):
-        self.logger.info("="*100)
-        self.logger.info("RECONCILE COMPARE SUMMARY")
-        self.logger.info("="*100)
-
-        success_count, failed_count, loaded_count = 0, 0, 0
-
+        success_count, failed_count, loaded_count, skipped_count = 0, 0, 0, 0
         for r in self.results:
             if r['status'] == 'PASSED': success_count += 1
             elif r['status'] == 'LOADED': loaded_count += 1
+            elif r['status'] == 'SKIPPED': skipped_count += 1
             else: failed_count += 1
+
+        summary_lines = [
+            "",
+            "="*80,
+            "FINAL SUMMARY REPORT",
+            "="*80,
+            "Execution ID : {0}".format(self.execution_id),
+            "Total Task   : {0}".format(len(self.results)),
+            "PASSED       : {0}".format(success_count),
+            "LOADED       : {0}".format(loaded_count),
+            "SKIPPED      : {0}".format(skipped_count),
+            "FAILED       : {0}".format(failed_count),
+            "Log File     : {0}".format(log_path),
+            "Output Dir   : {0}".format(output_dir),
+            "="*80
+        ]
         
-        print("\n" + "="*80)
-        print("FINAL SUMMARY REPORT")
-        print("="*80)
-        print("Total Task : {0}".format(len(self.results)))
-        print("PASSED     : {0}".format(success_count))
-        print("LOADED     : {0}".format(loaded_count))
-        print("FAILED     : {0}".format(failed_count))
-        print("Log File   : {0}".format(log_path))
-        print("Output Dir : {0}".format(output_dir))
-        print("="*80)
+        for line in summary_lines:
+            self.logger.info(line)
+            print(line)
 
 class MonitorThread(threading.Thread):
     def __init__(self, tracker, num_workers, log_path):
@@ -98,7 +107,8 @@ class MonitorThread(threading.Thread):
 
         lines = []
         lines.append("============================================================")
-        lines.append(" RECONCILE COMPARE MONITOR (Python 2.7 / PySpark) ")
+        lines.append(" RECONCILE COMPARE MONITOR (Python 2.7) ")
+        lines.append(" Execution ID: {0}".format(self.tracker.execution_id)) # แสดง ID ใน Dashboard
         lines.append("============================================================")
         lines.append(" Progress: {0}/{1} ({2:.2f}%)".format(comp, total, pct))
         lines.append(" Elapsed : {0:.0f}s".format(elapsed))
@@ -137,9 +147,11 @@ def setup_logging(log_dir, log_name="app", timestamp=None):
 # ==============================================================================
 
 class ConfigManager(object):
-    def __init__(self, args, logger):
+    def __init__(self, args, logger, execution_id):
         self.logger = logger
         self.mode = args.mode
+        self.args = args
+        self.execution_id = execution_id
         
         self.succeed_log_gp_path = ''
         self.succeed_log_pq_path = ''
@@ -148,8 +160,10 @@ class ConfigManager(object):
         self.metadata_base_dir = ''
         self.hive_status_table = ''
         self.hive_result_table = ''
+        self.kinit_cmd = ''
         
         self._load_env_config(args.env)
+        self._log_configurations()
         self.execution_list = self._build_queue(args.list, args.table_name)
 
     def _load_env_config(self, env_path):
@@ -175,28 +189,50 @@ class ConfigManager(object):
 
     def _build_queue(self, list_path, cli_tables):
         exec_list = []
+        seen_tables = set()
+
+        def add_task(db_part, sch_part, real_tbl):
+            task_key = "{0}.{1}.{2}".format(db_part, sch_part, real_tbl)
+            if task_key not in seen_tables:
+                seen_tables.add(task_key)
+                exec_list.append({'db': db_part.strip(), 'schema': sch_part.strip(), 'partition': real_tbl.strip()})
+
         if cli_tables:
             for t in cli_tables.split(','):
                 db_part, tbl_part = t.split('|')
                 sch_part, real_tbl = tbl_part.split('.')
-                exec_list.append({'db': db_part.strip(), 'schema': sch_part.strip(), 'partition': real_tbl.strip()})
-        else:
+                add_task(db_part.strip(), sch_part.strip(), real_tbl.strip())
+        elif list_path:
             try:
                 self.logger.info("Reading table list from: {0}".format(list_path))
                 with open(list_path, 'r') as f:
                     for line in f:
-                        line = line.strip()
+                        line = line.lower().strip()
                         if not line or line.startswith('#'): continue
                         db_part, tbl_part = line.split('|')
                         sch_part, real_tbl = tbl_part.split('.')
-                        exec_list.append({'db': db_part.strip(), 'schema': sch_part.strip(), 'partition': real_tbl.strip()})
+                        add_task(db_part.strip(), sch_part.strip(), real_tbl.strip())
             except Exception as e:
                 self.logger.critical("Cannot read list table: {0}".format(e), exc_info=True)
                 raise
-        self.logger.info("Successfully loaded {0} tables into queue.".format(len(exec_list)))
+                
+        self.logger.info("Successfully loaded {0} unique tables into queue.".format(len(exec_list)))
         if len(exec_list) == 0:
             self.logger.warning("WARNING: Execution list is EMPTY. Workers will exit immediately.")
         return exec_list
+    
+    def _log_configurations(self):
+        self.logger.info("--- Configuration Settings ---")
+        self.logger.info("Mode                 : {0}".format(self.mode))
+        self.logger.info("Concurrency          : {0}".format(self.args.concurrency))
+        self.logger.info("Env File             : {0}".format(self.args.env))
+        self.logger.info("Table List Input     : {0}".format(self.args.list or self.args.table_name))
+        self.logger.info("GP Log Path          : {0}".format(self.succeed_log_gp_path))
+        self.logger.info("PQ Log Path          : {0}".format(self.succeed_log_pq_path))
+        self.logger.info("Hive Status Table    : {0}".format(self.hive_status_table))
+        self.logger.info("Hive Result Table    : {0}".format(self.hive_result_table))
+        self.logger.info("Execution ID         : {0}".format(self.execution_id))
+        self.logger.info("------------------------------")
 
 # ==============================================================================
 # 3. Core Processing Modules
@@ -326,7 +362,7 @@ class ReconcileMain(object):
     def compare(self, gp_data, pq_data):
         """ Sequential Gating Logic for Comparison """
         res = {
-            'gp_count_tbl': gp_data.get('count', 0), 'pq_count_tbl': pq_data.get('count', 0),
+            'gp_count_record': gp_data.get('count', 0), 'pq_count_record': pq_data.get('count', 0),
             'gp_struct': {'SUM_MIN_MAX': 0, 'MIN_MAX': 0, 'MD5_MIN_MAX': 0},
             'pq_struct': {'SUM_MIN_MAX': 0, 'MIN_MAX': 0, 'MD5_MIN_MAX': 0},
             'columns': [],
@@ -340,7 +376,7 @@ class ReconcileMain(object):
             res['pq_struct'][m] = len(pq_data.get('methods', {}).get(m, {}))
 
         # Gate 1: Row Count
-        if res['gp_count_tbl'] != res['pq_count_tbl']:
+        if res['gp_count_record'] != res['pq_count_record']:
             res['status'] = 'FAILED'
             res['remark'] = 'Record count mismatch'
             return res
@@ -391,24 +427,24 @@ class ResultDataHandler(object):
         
         # Base Header
         h_rec = {
-        'table_name': full_table,
-        'gp_count_record': 0,
-        'pq_count_record': 0,
-        'gp_count_sum_min_max_col': 0,
-        'pq_count_sum_min_max_col': 0,
-        'gp_count_min_max_col': 0,
-        'pq_count_min_max_col': 0,
-        'gp_count_md5_min_max_col': 0,
-        'pq_count_md5_min_max_col': 0,
-        'gp_total_recon_col': 0,
-        'pq_total_recon_col': 0,
-        'reconcile_status': 'UNKNOWN', 
-        'remark': '',
-        'gp_json_file': gp_path or '', 
-        'parquet_json_file': pq_path or '',
-        'start_ts': start_ts.strftime('%Y-%m-%d %H:%M:%S'), 
-        'end_ts': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'execution_id': execution_id
+            'table_name': full_table,
+            'gp_count_record': None,
+            'pq_count_record': None,
+            'gp_count_sum_min_max_col': None,
+            'pq_count_sum_min_max_col': None,
+            'gp_count_min_max_col': None,
+            'pq_count_min_max_col': None,
+            'gp_count_md5_min_max_col': None,
+            'pq_count_md5_min_max_col': None,
+            'gp_total_recon_col': None,
+            'pq_total_recon_col': None,
+            'reconcile_status': 'UNKNOWN', 
+            'remark': None,
+            'gp_json_file': gp_path or None, 
+            'pq_json_file': pq_path or None,
+            'start_ts': start_ts.strftime('%Y-%m-%d %H:%M:%S'),
+            'end_ts': end_ts.strftime('%Y-%m-%d %H:%M:%S'),
+            'execution_id': execution_id
         }
 
         d_recs = []
@@ -424,13 +460,18 @@ class ResultDataHandler(object):
 
         if mode in ['load_gp', 'load_pq', 'load_both']:
             h_rec['reconcile_status'] = 'LOADED'
-            h_rec['remark'] = 'Load JSON Only Mode'
+            if mode == 'load_gp':
+                h_rec['remark'] = 'Load Greenplum JSON Only Mode'
+            elif mode == 'load_pq':
+                h_rec['remark'] = 'Load Parquet JSON Only Mode'
+            else:
+                h_rec['remark'] = 'Load Greenplum and Parquet JSON Only Mode'
             # Load dummy raw_result from whichever is available
             gp_struct = raw_result.get('gp_struct', {})
             pq_struct = raw_result.get('pq_struct', {})
             
-            h_rec['gp_count_record'] = raw_result.get('gp_count_tbl')
-            h_rec['pq_count_record'] = raw_result.get('pq_count_tbl')
+            h_rec['gp_count_record'] = raw_result.get('gp_count_record')
+            h_rec['pq_count_record'] = raw_result.get('pq_count_record')
             h_rec['gp_count_sum_min_max_col'] = gp_struct.get('SUM_MIN_MAX')
             h_rec['pq_count_sum_min_max_col'] = pq_struct.get('SUM_MIN_MAX')
             h_rec['gp_count_min_max_col'] = gp_struct.get('MIN_MAX')
@@ -442,15 +483,15 @@ class ResultDataHandler(object):
             h_rec['pq_total_recon_col'] = sum(pq_struct.values()) if pq_struct else None
             
             for col_res in raw_result.get('columns', []):
-                d_recs.append(self._build_detail_rec(full_table, col_res , 'LOADED'))
+                d_recs.append(self._build_detail_rec(full_table, col_res, execution_id , 'LOADED'))
 
         else:
             # Compare Mode
             h_rec['reconcile_status'] = raw_result['status']
             h_rec['remark'] = raw_result['remark']
             
-            h_rec['gp_count_record'] = raw_result['gp_count_tbl']
-            h_rec['pq_count_record'] = raw_result['pq_count_tbl']
+            h_rec['gp_count_record'] = raw_result['gp_count_record']
+            h_rec['pq_count_record'] = raw_result['pq_count_record']
             
             gs = raw_result['gp_struct']
             ps = raw_result['pq_struct']
@@ -460,11 +501,11 @@ class ResultDataHandler(object):
             h_rec['gp_total_recon_col'], h_rec['pq_total_recon_col'] = sum(gs.values()), sum(ps.values())
 
             for col_res in raw_result['columns']:
-                d_recs.append(self._build_detail_rec(full_table, col_res, col_res['status']))
+                d_recs.append(self._build_detail_rec(full_table, col_res, execution_id, col_res['status']))
 
         return h_rec, d_recs
     
-    def _build_detail_rec(self, table, col_res, status):
+    def _build_detail_rec(self, table, col_res, execution_id, status):
         method = col_res['method']
         gp_v, pq_v = col_res['gp_vals'], col_res['pq_vals']
         
@@ -474,7 +515,8 @@ class ResultDataHandler(object):
             'method': method,
             'gp_sum': None, 'gp_min': None, 'gp_max': None,
             'pq_sum': None, 'pq_min': None, 'pq_max': None,
-            'reconcile_result': status, 'remark': ''
+            'reconcile_result': status, 'execution_id': execution_id, 
+            'remark': None
         }
 
         if method == 'SUM_MIN_MAX':
@@ -503,10 +545,10 @@ class ReportWriter(object):
         
         self.h_cols = ['table_name', 'gp_count_record', 'pq_count_record', 'gp_count_sum_min_max_col', 'pq_count_sum_min_max_col',
                        'gp_count_min_max_col', 'pq_count_min_max_col', 'gp_count_md5_min_max_col', 'pq_count_md5_min_max_col',
-                       'gp_total_recon_col', 'pq_total_recon_col', 'reconcile_status', 'gp_json_file', 'parquet_json_file', 
+                       'gp_total_recon_col', 'pq_total_recon_col', 'reconcile_status', 'gp_json_file', 'pq_json_file', 
                        'start_ts', 'end_ts', 'execution_id', 'remark']
         self.d_cols = ['table_name', 'col_nm', 'data_type', 'method', 'gp_sum', 'gp_min', 'gp_max', 'pq_sum', 'pq_min', 'pq_max',
-                       'reconcile_result', 'remark']
+                       'reconcile_result', 'execution_id', 'remark']
                        
         with open(self.header_csv, 'w') as f:
             csv.DictWriter(f, fieldnames=self.h_cols).writeheader()
@@ -537,9 +579,17 @@ class VenvParquetHandler(object):
         if self.local_result and not os.path.exists(self.local_result):
             os.makedirs(self.local_result)
 
-    def log_results(self, h_rec, d_recs):
+    def log_results(self, h_rec, d_recs, worker=None):
         if not self.local_status or not self.local_result: 
             return
+        
+        def _write_log(level, msg, exc_info=False):
+            if worker and hasattr(worker, '_log'):
+                worker._log(level, msg, exc_info)
+            else:
+                if level == 'INFO': self.logger.info(msg)
+                elif level == 'WARNING': self.logger.warning(msg)
+                elif level == 'ERROR': self.logger.error(msg, exc_info=exc_info)
 
         payload = {'status': h_rec, 'result': d_recs}
         fd, temp_json_path = tempfile.mkstemp(suffix='.json')
@@ -557,9 +607,9 @@ class VenvParquetHandler(object):
                     self.local_result
                 )
 
-                self.logger.info("Calling Anaconda to write Parquet for table: {0}".format(h_rec.get('table_name')))
+                _write_log('INFO', "Step 6: Calling Anaconda to write Parquet for table: {0}".format(h_rec.get('table_name')))
                 output = subprocess.check_output(cmd_string, shell=True, executable='/bin/bash', stderr=subprocess.STDOUT)
-                self.logger.info("Successfully wrote parquet files via Anaconda for: {0}. Output: {1}".format(h_rec.get('table_name'), output.strip()))
+                _write_log('INFO', "Step 7: Successfully wrote parquet files via Anaconda for: {0}. Output: {1}".format(h_rec.get('table_name'), output.strip()))
 
                 file_uuid = output.strip().decode('utf-8') 
                 target_file = "part_{0}.parquet".format(file_uuid)
@@ -572,19 +622,19 @@ class VenvParquetHandler(object):
                         hdfs_cmd_result = "hdfs dfs -moveFromLocal {0}/{1} {2}/".format(self.local_result, target_file, self.hdfs_result)
                         result_out = subprocess.check_output(hdfs_cmd_result, shell=True, stderr=subprocess.STDOUT)
 
-                    self.logger.info("Successfully moved Parquet to HDFS for: {0}".format(h_rec.get('table_name')))
+                    _write_log('INFO', "Step 8: Successfully moved Parquet to HDFS for: {0}".format(h_rec.get('table_name')))
                 except subprocess.CalledProcessError as e:
                     actual_error = e.output.decode('utf-8', errors='ignore') if e.output else "No output"
-                    self.logger.warning("Failed to move Parquet to HDFS for {0}. HDFS Error: {1}".format(h_rec.get('table_name'), actual_error))
+                    _write_log('WARNING', "Failed to move Parquet to HDFS for {0}. HDFS Error: {1}".format(h_rec.get('table_name'), actual_error))
                 except Exception as e:
-                    self.logger.warning("Failed to move Parquet to HDFS for {0}: {1}".format(h_rec.get('table_name'), e))
+                    _write_log('WARNING', "Failed to move Parquet to HDFS for {0}: {1}".format(h_rec.get('table_name'), e))
 
             except subprocess.CalledProcessError as e:
                 actual_error_msg = e.output.decode('utf-8', errors='ignore') if hasattr(e, 'output') and e.output else "No additional error output."
-                self.logger.error("Anaconda Parquet write failed for {0}. Subprocess Exit Code: {1}\n>> ACTUAL ERROR DETAILS:\n{2}".format(
-                    h_rec.get('Table'), e.returncode, actual_error_msg))
+                _write_log('ERROR', "Anaconda Parquet write failed for {0}. Subprocess Exit Code: {1}\n>> ACTUAL ERROR DETAILS:\n{2}".format(
+                    h_rec.get('table_name'), e.returncode, actual_error_msg))
             except Exception as e:
-                self.logger.error("Unexpected error in VenvParquetHandler for {0}: {1}".format(h_rec.get('table_name'), e), exc_info=True)
+                _write_log('ERROR', "Unexpected error in VenvParquetHandler for {0}: {1}".format(h_rec.get('table_name'), e), exc_info=True)
             finally:
                 if os.path.exists(temp_json_path):
                     os.remove(temp_json_path)
@@ -611,6 +661,20 @@ class Worker(threading.Thread):
         self.execution_id = execution_id
         self.logger = logger
         self.daemon = True
+        self.log_buffer = []
+
+    def _log(self, level, msg, exc_info=False):
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]
+        formatted_msg = "{0} [{1}] {2}".format(ts, self.name, msg)
+        self.log_buffer.append({'level': level, 'msg': formatted_msg, 'exc_info': exc_info})
+
+    def _flush_logs(self):
+        """Writes all buffered logs for the current table to the main logger."""
+        for log in self.log_buffer:
+            if log['level'] == 'INFO': self.logger.info(log['msg'])
+            elif log['level'] == 'WARNING': self.logger.warning(log['msg'])
+            elif log['level'] == 'ERROR': self.logger.error(log['msg'], exc_info=log['exc_info'])
+        self.log_buffer = []
 
     def run(self):
         self.logger.info("{0} started and waiting for tasks.".format(self.name))
@@ -627,79 +691,89 @@ class Worker(threading.Thread):
             start_datetime = datetime.now()
             self.tracker.update_worker_status(self.name, "[BUSY] {0}".format(partition))
 
-            self.logger.info("[{0}] --- Starting processing table: {1} ---".format(self.name, full_name))
+            start_datetime = datetime.now()
+            start_ts_str = start_datetime.strftime('%Y-%m-%d %H:%M:%S')
+
+            self._log('INFO', "--- Starting processing table: {0} | Start: {1} ---".format(full_name, start_ts_str))
 
             try:
                 raw_res, error_state = None, None
                 gp_p, pq_p = None, None
                 
                 # 1. Check Source Logs
-                self.logger.info("[{0}] Step 1: Validating Logs".format(self.name))
+                self._log('INFO', "Step 1: Validating Logs".format(self.name))
                 gp_p, pq_p, gp_err, pq_err = self.log_validator.get_json_paths(db, schema, partition, self.config.mode)
 
-                self.logger.info("[{0}] Paths Retrieved -> GP_PATH: {1}, PQ_PATH: {2}".format(self.name, gp_p, pq_p))
-                self.logger.info("[{0}] Errors Retrieved -> GP_ERR: '{1}', PQ_ERR: '{2}'".format(self.name, gp_p, pq_p))
+                self._log('INFO', "Paths Retrieved -> GP_PATH: {0}, PQ_PATH: {1}".format(gp_p, pq_p))
+                self._log('INFO', "Errors Retrieved -> GP_ERR: '{0}', PQ_ERR: '{1}'".format(gp_err, pq_err))
 
                 if self.config.replace_path_from and self.config.replace_path_to:
                     if gp_p:
                         original_gp_path = gp_p
                         gp_p = original_gp_path.replace(self.config.replace_path_from, self.config.replace_path_to)
-                        self.logger.info("Replace GP json output path from: {0} to {1}".format(original_gp_path, gp_p))
+                        self._log('INFO', "Replace GP json output path from: {0} to {1}".format(original_gp_path, gp_p))
                 
                 if gp_err or pq_err:
                     err_msgs = []
                     if gp_err: err_msgs.append(gp_err)
                     if pq_err: err_msgs.append(pq_err)
                     error_state = "SKIPPED: {0}".format(" | ".join(err_msgs))
-                    self.logger.warning("[{0}] {1} -> {2}".format(self.name, full_name, error_state))
+                    self._log('WARNING', "{0} -> {1}".format(full_name, error_state))
                 else:
                     # 2. Fetch JSON
-                    self.logger.info("[{0}] Step 2: Fetching JSONs (GP: {1}, PQ: {2})".format(self.name, gp_p, pq_p))
+                    self._log('INFO', "Step 2: Fetching JSONs (GP: {0}, PQ: {1})".format(gp_p, pq_p))
                     gp_data, pq_data, gp_jerr, pq_jerr = self.json_handler.fetch_and_validate(gp_p, pq_p, self.config.mode)
                     if gp_jerr or pq_jerr:
                         error_state = "MISSING-FILE: {0} {1}".format(gp_jerr or '', pq_jerr or '').strip()
-                        self.logger.warning("[{0}] {1} -> {2}".format(self.name, full_name, error_state))
+                        self._log('WARNING', "{0} -> {1}".format(full_name, error_state))
                     else:
                         # 3. Execution Mode Logic
-                        self.logger.info("[{0}] Step 3: Executing Logic (Mode: {1})".format(self.name, self.config.mode))
+                        self._log('INFO', "Step 3: Executing Logic (Mode: {0})".format(self.config.mode))
                         if self.config.mode == 'compare':
                             raw_res = self.reconcile_engine.compare(gp_data, pq_data)
                         elif self.config.mode in ['load_gp', 'load_pq', 'load_both']:
                             raw_res = self._build_load_mock(gp_data, pq_data)
 
                 # 4. Format Result
-                self.logger.info("[{0}] Step 4: Formatting Results".format(self.name))
+                self._log('INFO', "Step 4: Formatting Results")
                 h_rec, d_recs = self.data_handler.format_results(
                     db, schema, partition, self.execution_id, raw_res, 
                     self.config.mode, gp_p, pq_p, self.job_start_time, error_state
                 )
 
                 # 5. Write Outputs
-                self.logger.info("[{0}] Step 5: Writing Outputs to CSV and Hive".format(self.name))
+                self._log('INFO', "Step 5: Writing Outputs to CSV and Hive")
                 self.report_writer.append_results(h_rec, d_recs)
                 if self.hive_handler:
-                    self.hive_handler.log_results(h_rec, d_recs)
+                    self.hive_handler.log_results(h_rec, d_recs, self)
+
+                end_datetime = datetime.now()
+                end_ts_str = end_datetime.strftime('%Y-%m-%d %H:%M:%S')
+                duration = end_datetime - start_datetime
+                duration_str = str(duration).split('.')[0]
 
                 # 6. Update Tracker
                 self.tracker.add_result(full_name, h_rec['reconcile_status'], h_rec['remark'])
-                self.logger.info("[{0}] Completed {1} with Status: {2}".format(self.name, full_name, h_rec['reconcile_status']))
+                self._log('INFO', "Completed {0} with Status: {1} | End: {2} | Duration: {3}".format(
+                    full_name, h_rec['reconcile_status'], end_ts_str, duration_str))
 
             except Exception as e:
-                self.logger.error("[{0}] FATAL Error on {1}: {2}".format(self.name, full_name, e), exc_info=True)
+                self._log('ERROR', "FATAL Error on {0}: {1}".format(full_name, e), exc_info=True)
                 self.tracker.add_result(full_name, "FATAL-ERROR", str(e))
             finally:
                 self.queue.task_done()
+                self._flush_logs()
                 
     def _build_load_mock(self, gp_data, pq_data):
-        res = {'columns': [], 'gp_count_tbl': 0, 'pq_count_tbl': 0, 'gp_struct': {}, 'pq_struct': {}}
+        res = {'columns': [], 'gp_count_record': None, 'pq_count_record': None, 'gp_struct': {}, 'pq_struct': {}}
         
         if gp_data:
-            res['gp_count_tbl'] = gp_data.get('count')
+            res['gp_count_record'] = gp_data.get('count')
             for m in ['SUM_MIN_MAX', 'MIN_MAX', 'MD5_MIN_MAX']:
                 res['gp_struct'][m] = len(gp_data.get('methods', {}).get(m, {}))
         
         if pq_data:
-            res['pq_count_tbl'] = pq_data.get('count')
+            res['pq_count_record'] = pq_data.get('count')
             for m in ['SUM_MIN_MAX', 'MIN_MAX', 'MD5_MIN_MAX']:
                 res['pq_struct'][m] = len(pq_data.get('methods', {}).get(m, {}))
                 
@@ -733,14 +807,17 @@ class ReconcileJob(object):
         self.out_dir = os.path.join(main_path, 'output', datetime.now().strftime("%Y%m%d"))
         if not os.path.exists(self.out_dir): os.makedirs(self.out_dir)
 
-        self.config = ConfigManager(args, logger)
-        if hasattr(self.config, 'kinit_cmd') and self.config.kinit_cmd:
-            self._authenticate_kerberos()
-        self.tracker = ProcessTracker(logger)
-        self.tracker.set_total_task(len(self.config.execution_list))
-
         short_uuid = str(uuid.uuid4()).split('-')[0]
         self.execution_id = "JOB_{0}_{1}".format(self.global_ts, short_uuid)
+
+        self.config = ConfigManager(args, logger, self.execution_id)
+        
+        if hasattr(self.config, 'kinit_cmd') and self.config.kinit_cmd:
+            self._authenticate_kerberos()
+
+        self.tracker = ProcessTracker(logger)
+        self.tracker.set_execution_id(self.execution_id)
+        self.tracker.set_total_task(len(self.config.execution_list))        
 
         # Init Modules
         self.log_validator = SucceededLogValidator(self.config.succeed_log_gp_path, self.config.succeed_log_pq_path, logger)
@@ -808,14 +885,21 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', default='env_config.txt')
-    parser.add_argument('--list', default='list_table.txt')
-    parser.add_argument('--table_name', help='Specific tables (DB|Schema.Partition)')
     parser.add_argument('--concurrency', default=4, type=int)
     parser.add_argument('--mode', choices=['compare', 'load_gp', 'load_pq', 'load_both'], default='compare')
+    
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--list', help='Name of list of tables file')
+    group.add_argument('--table_name', help='Specific tables (DB|Schema.Partition)')
+    
     args = parser.parse_args()
 
+    if not args.list and not args.table_name:
+        args.list = 'list_table.txt'
+
     args.env = os.path.join(main_path, 'config', os.path.basename(args.env))
-    args.list = os.path.join(main_path, 'config', os.path.basename(args.list))
+    if args.list:
+        args.list = os.path.join(main_path, 'config', os.path.basename(args.list))
 
     global_date = datetime.now().strftime("%Y%m%d")
     global_ts = datetime.now().strftime("%Y%m%d_%H%M%S")

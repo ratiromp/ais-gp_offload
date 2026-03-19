@@ -383,7 +383,7 @@ class Config(object):
             # Case 1: Use CLI Arguments
             self.logger.info("Using CLI arguments for table list.")
             # Expect format: DB|Schema.Table,DB2|Schema.Table
-            tables = cli_tables.split(',')
+            tables = cli_tables.lower().split(',')
             for t in tables:
                 try:
                     # Parse DB|Schema.Table
@@ -410,7 +410,7 @@ class Config(object):
                 try:
                     with open(list_file_path, 'r') as f:
                         for line in f:
-                            line = line.strip()
+                            line = line.lower().strip()
                             # skip Header
                             if not line or line.startswith('#'):
                                 continue
@@ -439,6 +439,9 @@ class Config(object):
                 self.logger.error("List file: {0} does not exist or is empty.".format(list_file_path))
                 raise
 
+        # distinct execution_list
+        self.execution_list = list({(d['db'], d['schema'], d['table']): d for d in self.execution_list}.values())
+        
         if self.gp_db and self.thai_mapping_table and self.thai_mapping_export_path:
             self._export_thai_mapping()
             self._load_thai_mapping()

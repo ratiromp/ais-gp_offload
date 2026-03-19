@@ -1158,9 +1158,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Greenplum Data Export Tool')
     parser.add_argument('--env', default='env_config.txt', help='Name of env config file')
     parser.add_argument('--master', help='Name of master config file')
-    parser.add_argument('--list', default='list_table.txt', help='Name of list of tables file')
-    parser.add_argument('--table_name', help='Optional: Specific tables to run (DB|Schema.Table)')
     parser.add_argument('--concurrency', default=4, type=int, help='Number of parallel workers (Default: 4)')
+    
+    # handle table and list
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--list', default='list_table.txt', help='Name of list of tables file')
+    group.add_argument('--table_name', help='Optional: Specific table to run (DB|Schema.Table)')
 
     args = parser.parse_args()
 

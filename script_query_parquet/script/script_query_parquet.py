@@ -617,8 +617,21 @@ class HDFSHandler(object):
         try:
             local_mtime = os.path.getmtime(local_file_path)
         except OSError as e:
-            raise RuntimeError("Local path not found or inaccessible: {0}".format(e))
+            raise ValueError("SKIPPED: Local path not found or inaccessible: {0}".format(local_file_path))
         
+        has_parquet = False
+        if os.path.isdir(local_file_path):
+            for root, dirs, files in os.walk(local_file_path):
+                if any(f.endswith('.parquet') for f in files):
+                    has_parquet = True
+                    break
+        else:
+            if local_file_path.endswith('.parquet'):
+                has_parquet = True
+                
+        if not has_parquet:
+            raise ValueError("SKIPPED: No parquet files found in local path (or sub-folders): {0}".format(local_file_path))
+
         local_path_str = "file:///" + os.path.abspath(local_file_path).replace("\\", "/").lstrip("/")
         local_path_obj = self.Path(local_path_str)
         hdfs_path_obj = self.Path(hdfs_dest_path)
@@ -939,7 +952,11 @@ class Worker(threading.Thread):
 
             except ValueError as ve:
                 msg = str(ve)
-                status = "SKIPPED" if "SKIPPED" in msg else "FAILED"
+                if "SKIPPED" in msg:
+                    status = "SKIPPED"
+                    msg = msg.replace("SKIPPED: ", "").replace("SKIPPED", "").strip()
+                else:
+                    status = "FAILED"
                 self.tracker.add_result(partition, status, time.time() - start_t, msg)
                 self.hive_logger.log_execution_status(self.execution_id, db, schema, base_table, partition, start_datetime, datetime.now(), time.time() - start_t, status.lower(), msg)
             except Exception as e:

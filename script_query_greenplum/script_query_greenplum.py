@@ -439,6 +439,9 @@ class Config(object):
                 self.logger.error("List file: {0} does not exist or is empty.".format(list_file_path))
                 raise
 
+        # distint execution_list
+        self.execution_list = list({(d['db'], d['schema'], d['table']): d for d in self.execution_list}.values())
+        
         if self.gp_db and self.thai_mapping_table and self.thai_mapping_export_path:
             self._export_thai_mapping()
             self._load_thai_mapping()

@@ -131,6 +131,7 @@ def setup_logging(log_dir, log_name="app", timestamp=None):
     fh.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
     logger.addHandler(fh)
     return logger, log_file
+
 # ==============================================================================
 # 2. Configuration & Initialization
 # ==============================================================================
@@ -165,6 +166,7 @@ class ConfigManager(object):
                         elif key == 'replace_path_to': self.replace_path_to = val
                         elif key == 'metadata_base_dir': self.metadata_base_dir = val
                         elif key == 'conda_activate_cmd': self.conda_activate_cmd = val
+                        elif key == 'kinit': self.kinit_cmd = val
                         elif key == 'hive_status_table': self.hive_status_table = val
                         elif key == 'hive_result_table': self.hive_result_table = val
         except Exception as e:
@@ -217,7 +219,7 @@ class SucceededLogValidator(object):
             pattern = os.path.join(base_path, "*", db, schema, "stat_csv", "log_stat_rc_*.csv")
             matched_files = sorted(glob.glob(pattern), reverse=True)
 
-            self.logger.info("LogValidator [{0}]: Found {1} files for {2}.{3} using pattern: {4}".format(source, len(matched_files), db, schema, pattern))
+            self.logger.info("LogValidator [{0}]: Found {1} files for {2}.{3}".format(source, len(matched_files), db, schema))
             
             for log_file in matched_files:
                 try:
@@ -228,11 +230,14 @@ class SucceededLogValidator(object):
                         ]
                         reader = csv.DictReader(f, fieldnames=fields)
                         for row in reader:
-                            tbl = row.get('greenplum_tbl', '')
+                            tbl = row.get('greenplum_tbl', '').strip().replace('"', '').replace("'", "")
                             if tbl and tbl != 'greenplum_tbl':
                                 current_ts = self.cache[source][cache_key].get(tbl, {}).get('end_timestamp', '')
-                                new_ts = row.get('end_timestamp', '')
+                                new_ts = row.get('end_timestamp', '').strip()
+                                
                                 if not current_ts or new_ts > current_ts:
+                                    row['run_status'] = row.get('run_status', '').strip()
+                                    row['json_output_path'] = row.get('json_output_path', '').strip()
                                     self.cache[source][cache_key][tbl] = row
                 except Exception as e:
                     self.logger.warning("Error reading log file {0}: {1}".format(log_file, e))
@@ -246,26 +251,41 @@ class SucceededLogValidator(object):
                 self._load_cache('pq', db, schema)
 
         cache_key = "{0}_{1}".format(db, schema)
-        target_name = "{0}.{1}".format(schema, partition)
         
+        target_name_1 = partition.strip()
+        target_name_2 = "{0}.{1}".format(schema, partition).strip()
+        target_name_3 = "{0}.{1}.{2}".format(db, schema, partition).strip()
+
+        def find_row_in_cache(src):
+            cache_dict = self.cache[src].get(cache_key, {})
+            return cache_dict.get(target_name_1) or cache_dict.get(target_name_2) or cache_dict.get(target_name_3)
+
         gp_path, pq_path = None, None
         gp_err, pq_err = "", ""
 
         if mode in ['compare', 'load_gp', 'load_both']:
-            row = self.cache['gp'].get(cache_key, {}).get(partition) or self.cache['gp'].get(cache_key, {}).get(target_name)
-            self.logger.info("LogValidator [GP]: Lookup for '{0}' or '{1}'".format(partition, target_name))
-            if row and row.get('run_status') == 'SUCCEEDED':
-                gp_path = row.get('json_output_path')
+            row = find_row_in_cache('gp')
+            if row:
+                self.logger.info("LogValidator [GP]: Latest record for '{0}' has status '{1}' at '{2}'".format(
+                    partition, row.get('run_status'), row.get('end_timestamp')))
+                if row.get('run_status') == 'SUCCEEDED':
+                    gp_path = row.get('json_output_path', '').strip()
+                else:
+                    gp_err = "Latest query greenplum status is {0}".format(row.get('run_status'))
             else:
-                gp_err = "Latest query greenplum status is not SUCCEEDED"
+                gp_err = "Table not found in greenplum log"
 
         if mode in ['compare', 'load_pq', 'load_both']:
-            row = self.cache['pq'].get(cache_key, {}).get(partition) or self.cache['pq'].get(cache_key, {}).get(target_name)
-            self.logger.info("LogValidator [PQ]: Lookup for '{0}' or '{1}'".format(partition, target_name))
-            if row and row.get('run_status') == 'SUCCEEDED':
-                pq_path = row.get('json_output_path')
+            row = find_row_in_cache('pq')
+            if row:
+                self.logger.info("LogValidator [PQ]: Latest record for '{0}' has status '{1}' at '{2}'".format(
+                    partition, row.get('run_status'), row.get('end_timestamp')))
+                if row.get('run_status') == 'SUCCEEDED':
+                    pq_path = row.get('json_output_path', '').strip()
+                else:
+                    pq_err = "Latest query parquet status is {0}".format(row.get('run_status'))
             else:
-                pq_err = "Latest query parquet status is not SUCCEEDED"
+                pq_err = "Table not found in parquet log"
 
         return gp_path, pq_path, gp_err, pq_err
     
@@ -546,13 +566,16 @@ class VenvParquetHandler(object):
 
                 try:
                     hdfs_cmd_status = "hdfs dfs -moveFromLocal {0}/{1} {2}/".format(self.local_status, target_file, self.hdfs_status)
-                    subprocess.check_call(hdfs_cmd_status, shell=True)
+                    status_out = subprocess.check_output(hdfs_cmd_status, shell=True, stderr=subprocess.STDOUT)
 
                     if d_recs:
                         hdfs_cmd_result = "hdfs dfs -moveFromLocal {0}/{1} {2}/".format(self.local_result, target_file, self.hdfs_result)
-                        subprocess.check_call(hdfs_cmd_result, shell=True)
+                        result_out = subprocess.check_output(hdfs_cmd_result, shell=True, stderr=subprocess.STDOUT)
 
                     self.logger.info("Successfully moved Parquet to HDFS for: {0}".format(h_rec.get('table_name')))
+                except subprocess.CalledProcessError as e:
+                    actual_error = e.output.decode('utf-8', errors='ignore') if e.output else "No output"
+                    self.logger.warning("Failed to move Parquet to HDFS for {0}. HDFS Error: {1}".format(h_rec.get('table_name'), actual_error))
                 except Exception as e:
                     self.logger.warning("Failed to move Parquet to HDFS for {0}: {1}".format(h_rec.get('table_name'), e))
 
@@ -711,6 +734,8 @@ class ReconcileJob(object):
         if not os.path.exists(self.out_dir): os.makedirs(self.out_dir)
 
         self.config = ConfigManager(args, logger)
+        if hasattr(self.config, 'kinit_cmd') and self.config.kinit_cmd:
+            self._authenticate_kerberos()
         self.tracker = ProcessTracker(logger)
         self.tracker.set_total_task(len(self.config.execution_list))
 
@@ -741,6 +766,14 @@ class ReconcileJob(object):
 
         self.job_queue = Queue.Queue()
         for task in self.config.execution_list: self.job_queue.put(task)
+    
+    def _authenticate_kerberos(self):
+        try:
+            self.logger.info("Executing Kerberos authentication: {0}".format(self.config.kinit_cmd))
+            subprocess.check_call(self.config.kinit_cmd, shell=True)
+            self.logger.info("Kerberos authentication successful.")
+        except subprocess.CalledProcessError as e:
+            self.logger.error("Kerberos authentication FAILED. HDFS commands may fail: {0}".format(e))
 
     def run(self):
         num_workers = self.args.concurrency

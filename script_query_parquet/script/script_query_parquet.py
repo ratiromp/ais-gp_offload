@@ -174,7 +174,7 @@ class ConfigManager(object):
         self.thai_mapping_export_path = ''
         self.thai_dict = {}
 
-        self.local_temp_dir = os.path.join(main_path, 'temp', 'output')
+        self.local_temp_dir = os.path.join(main_path, 'output')
         #self.nas_dest_base = os.path.join(main_path, 'output')
         #self.log_dir = os.path.join(main_path, 'log')
 
@@ -907,7 +907,7 @@ class Worker(threading.Thread):
 
     def logging_status(self, status, remark=""):
         # 1. Define directory path
-        # temp status directory: <temp>/<date>/stat_csv/<db>/<schema>
+        # temp status directory: /output/<date>/stat_csv/<db>/<schema>
         status_dir = os.path.join(self.config.local_temp_dir, 'stat_csv', self.db, self.schema)
         self.logger.info("[{0}] Logging status to directory: {1}".format(self.name, status_dir))
         #self.status = status

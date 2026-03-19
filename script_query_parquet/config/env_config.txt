@@ -1,4 +1,4 @@
-local_temp_dir=/data/AIS-EDW/gpoffload/script_reconcile_query_parquet/temp/output/
+local_temp_dir=/data/AIS-EDW/gpoffload/script_reconcile_query_parquet/output/
 succeed_path=/home/MNT_NFS/GP_DWS/mig_stat_log/
 hdfs_path=/data/gpoffload/data_recon
 replace_path_from=/MNT/GP_DWS/

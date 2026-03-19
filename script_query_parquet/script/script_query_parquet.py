@@ -1436,7 +1436,7 @@ if __name__ == "__main__":
 
     # Reject if user tries to provide both target inputs explicitly
     if '--list' in sys.argv and '--table_name' in sys.argv:
-        print("ERROR: Please use either --list or --table_name")
+        print("ERROR: Invalid argument combination. Please specify either --list (to see all tables) or --table_name (to query a specific table).")
         sys.exit(1)
 
     def resolve_config_path(input_path, base_dir):

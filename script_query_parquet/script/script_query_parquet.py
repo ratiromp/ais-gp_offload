@@ -1331,7 +1331,13 @@ class ParquetQueryJob(object):
             self.tracker.add_result(invalid_node['table'], "FAILED", 0.0, invalid_node['reason'])
 
     def run(self):
-        input_name = os.path.splitext(os.path.basename(self.args.list))[0]
+        #input_name = os.path.splitext(os.path.basename(self.args.list))[0]
+        if self.args.list:
+            input_name = os.path.splitext(os.path.basename(self.args.list))[0]
+        else:
+            # If --table_name is used instead of --list, use a generic name for the status file
+            input_name = "list_table"
+
         status_file_filenm = "log_stat_rc_{0}_{1}.csv".format(input_name, self.global_ts)
 
         num_workers = int(self.args.concurrency)
@@ -1391,10 +1397,21 @@ if __name__ == "__main__":
     parser.add_argument('--env', default='env_config.txt')
     parser.add_argument('--master', help='Override config_master_file_path defined in env_config')
     parser.add_argument('--map', default='data_type_mapping.json')
-    parser.add_argument('--list', default='list_table.txt')
-    parser.add_argument('--table_name', help='Specific tables to run (DB|Schema.Partition)')
+    #parser.add_argument('--list', default='list_table.txt')
+    #parser.add_argument('--table_name', help='Specific tables to run (DB|Schema.Partition)')
     parser.add_argument('--concurrency', default=4, type=int)
+
+    # handle table and list as mutually exclusive arguments
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--list', help='Path to list file (e.g. list_table.txt)')
+    group.add_argument('--table_name', help='Specific tables to run (DB|Schema.Partition)')
+
+    # Parse arguments
     args = parser.parse_args()
+
+    # Set default list file if neither --list nor --table_name is provided
+    if args.list is None and args.table_name is None:
+        args.list = 'list_table.txt'
 
     def resolve_config_path(input_path, base_dir):
         if not input_path: return input_path
@@ -1402,11 +1419,16 @@ if __name__ == "__main__":
             return input_path
         return os.path.join(base_dir, 'config', input_path)
 
+    # Resolve paths
     args.env = resolve_config_path(args.env, main_path)
     if args.master is not None:
         args.master = resolve_config_path(args.master, main_path)
     args.map = resolve_config_path(args.map, main_path)
-    args.list = resolve_config_path(args.list, main_path)
+
+    #args.list = resolve_config_path(args.list, main_path)
+    if args.list is not None:
+        args.list = resolve_config_path(args.list, main_path)
+
     run_datetime = datetime.now()
     global_date_folder = run_datetime.strftime("%Y%m%d")
     global_ts = run_datetime.strftime("%Y%m%d_%H%M%S")

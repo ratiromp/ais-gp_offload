@@ -11,10 +11,6 @@ gp_db=prodgp
 thai_mapping_table=prodgp.gpoffload.gp_list_th_col 
 thai_mapping_export_path=/data/AIS-EDW/gpoffload/script_reconcile_query_parquet/temp/
 
-KEYTAB_PATH=/home/dlcdrauth/dlcdrauth.keytab
-PRINCIPAL=dlcdrauth@CORP.AIS900.ORG
-
-
 default_numeric_p=38
 default_numeric_s=10
 cast_real_p=24

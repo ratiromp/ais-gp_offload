@@ -383,7 +383,7 @@ class Config(object):
             # Case 1: Use CLI Arguments
             self.logger.info("Using CLI arguments for table list.")
             # Expect format: DB|Schema.Table,DB2|Schema.Table
-            tables = cli_tables.split(',')
+            tables = cli_tables.lower().split(',')
             for t in tables:
                 try:
                     # Parse DB|Schema.Table
@@ -410,7 +410,7 @@ class Config(object):
                 try:
                     with open(list_file_path, 'r') as f:
                         for line in f:
-                            line = line.strip()
+                            line = line.lower().strip()
                             # skip Header
                             if not line or line.startswith('#'):
                                 continue
@@ -439,6 +439,9 @@ class Config(object):
                 self.logger.error("List file: {0} does not exist or is empty.".format(list_file_path))
                 raise
 
+        # distinct execution_list
+        self.execution_list = list({(d['db'], d['schema'], d['table']): d for d in self.execution_list}.values())
+        
         if self.gp_db and self.thai_mapping_table and self.thai_mapping_export_path:
             self._export_thai_mapping()
             self._load_thai_mapping()
@@ -1158,9 +1161,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Greenplum Data Export Tool')
     parser.add_argument('--env', default='env_config.txt', help='Name of env config file')
     parser.add_argument('--master', help='Name of master config file')
-    parser.add_argument('--list', default='list_table.txt', help='Name of list of tables file')
-    parser.add_argument('--table_name', help='Optional: Specific tables to run (DB|Schema.Table)')
     parser.add_argument('--concurrency', default=4, type=int, help='Number of parallel workers (Default: 4)')
+    
+    # handle table and list
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--list', default='list_table.txt', help='Name of list of tables file')
+    group.add_argument('--table_name', help='Optional: Specific table to run (DB|Schema.Table)')
 
     args = parser.parse_args()
 

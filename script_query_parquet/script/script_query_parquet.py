@@ -173,7 +173,7 @@ class ConfigManager(object):
         self.thai_mapping_table = ''
         self.thai_mapping_export_path = ''
         self.thai_dict = {}
-
+        
         self.local_temp_dir = os.path.join(main_path, 'output')
         #self.nas_dest_base = os.path.join(main_path, 'output')
         #self.log_dir = os.path.join(main_path, 'log')
@@ -239,18 +239,25 @@ class ConfigManager(object):
         # 2. Load Target Tables (Moved up before Thai mapping logic to build IN clause)
         self.execution_list = []
         self.invalid_tables = []
+        seen_tables = set()
+
         if cli_tables:
             self.logger.info("Using CLI arguments for table list.")
-            tables = cli_tables.split(',')
+            tables = cli_tables.lower().split(',')
             for t in tables:
                 try:
                     db_part, tbl_part = t.split('|')
                     sch_part, real_tbl = tbl_part.split('.')
                     if db_part and sch_part and real_tbl:
+                        table_key = (db_part.strip(), sch_part.strip(), real_tbl.strip())
+                        if table_key in seen_tables:
+                            self.logger.warning("Duplicate table found and removed: {0}".format(t.strip()))
+                            continue
+                        seen_tables.add(table_key)
                         self.execution_list.append({
-                            'db': db_part.strip(),
-                            'schema': sch_part.strip(),
-                            'partition': real_tbl.strip()
+                            'db': table_key[0],
+                            'schema': table_key[1],
+                            'partition': table_key[2]
                         })
                     else:
                         self.logger.error("Invalid format in argument: {0}. Expected DB|Schema.Table".format(t))
@@ -264,16 +271,21 @@ class ConfigManager(object):
             try:
                 with open(list_file_path, 'r') as f:
                     for line in f:
-                        line = line.strip()
+                        line = line.strip().lower()
                         if not line or line.startswith('#'): continue
                         try:
                             db_part, tbl_part = line.split('|')
                             sch_part, real_tbl = tbl_part.split('.')
                             if db_part and sch_part and real_tbl:
+                                table_key = (db_part.strip(), sch_part.strip(), real_tbl.strip())
+                                if table_key in seen_tables:
+                                    self.logger.warning("Duplicate table found and removed in list file: {0}".format(line))
+                                    continue
+                                seen_tables.add(table_key)
                                 self.execution_list.append({
-                                    'db': db_part.strip(),
-                                    'schema': sch_part.strip(),
-                                    'partition': real_tbl.strip()
+                                    'db': table_key[0],
+                                    'schema': table_key[1],
+                                    'partition': table_key[2]
                                 })
                             else:
                                 self.logger.error("Skipping invalid line in list file: {0}. Expected DB|Schema.Table".format(line))
@@ -905,7 +917,7 @@ class Worker(threading.Thread):
         except Exception as e:
             return False, str(e)
 
-    def logging_status(self, status, remark=""):
+    def logging_status(self, status, remark="", nas_json_path=""):
         # 1. Define directory path
         # temp status directory: /output/<date>/stat_csv/<db>/<schema>
         status_dir = os.path.join(self.config.local_temp_dir, 'stat_csv', self.db, self.schema)
@@ -913,7 +925,8 @@ class Worker(threading.Thread):
         #self.status = status
 
         remark = "-" if status.upper() == "SUCCESS" else remark
-        status = "SUCCEEDED" if status.upper() == "SUCCESS" else status
+        statused = "SUCCEEDED" if status.upper() == "SUCCESS" else status
+
         # 2. Directory creation with Race Condition handling
         if not os.path.exists(status_dir):
             try:
@@ -942,10 +955,10 @@ class Worker(threading.Thread):
         start_ts = getattr(self, "start_ts_tbl", "")
         #status = getattr(self, "status", "")
         #error_message = getattr(self, "error_message", "").replace('\n', ' ')
-        json_output_path = getattr(self, "local_json_file", "")
+        #json_output_path = getattr(self, "local_json_file", "")
         reconcile_method = getattr(self, "reconcile_method", [])
         self.logger.info("[{0}] Retrieved attributes for logging. Short Name: {1}, Start TS: {2}, Status: {3}".format(
-            self.name, short_name, start_ts, status
+            self.name, short_name, start_ts, statused
         ))
 
         # 5. Timing & Duration calculation
@@ -973,9 +986,9 @@ class Worker(threading.Thread):
             start_ts, end_ts, 
             duration_str, 
             reconcile_method_str, 
-            status, 
+            statused, 
             remark, 
-            json_output_path, 
+            nas_json_path, 
             "" # remark
             ] 
 
@@ -1204,17 +1217,12 @@ class Worker(threading.Thread):
                 #         self.name, partition, copy_err, copy_sql_err))
                 if copy_success and json_exists:
                     self.logger.info("Worker {0} successfully saved and copied JSON to NAS for {1}".format(self.name, partition))
-                else:
-                    self.logger.error("Worker {0} failed NAS sync for {1}. JSON Err: {2}".format(
-                        self.name, partition, copy_err))
-                # Step 6: Finalize Status
-                duration = time.time() - start_t
-                
-                # if copy_success and copy_sql_success and json_exists and sql_exists:
-                if copy_success and json_exists:
                     status = "SUCCESS"
                     remark = "JSON Generated."
                 else:
+                    self.logger.error("Worker {0} failed NAS sync for {1}. JSON Err: {2}".format(
+                        self.name, partition, copy_err))
+                    
                     status = "FAILED"
                     err_remarks = []
                     if not copy_success: err_remarks.append("JSON Copy Error ({0})".format(copy_err))
@@ -1222,6 +1230,9 @@ class Worker(threading.Thread):
                     # if not copy_sql_success: err_remarks.append("SQL Copy Error ({0})".format(copy_sql_err))
                     # if not sql_exists: err_remarks.append("SQL Not Found on NAS")
                     remark = " | ".join(err_remarks)
+
+                # Step 6: Finalize Status
+                duration = time.time() - start_t
 
                 if missing_meta:
                     remark = "Metadata Missing (Count-only) | " + remark
@@ -1256,7 +1267,7 @@ class Worker(threading.Thread):
                 # After finishing processing, write one CSV line:
                 try:
                     self.logger.info("Worker {0} logging status for {1}...".format(self.name, full_name))
-                    self.logging_status(status, remark)
+                    self.logging_status(status, remark, nas_json_path)
                 except Exception as e:
                     self.logger.error("Failed writing logging_status for {}: {}".format(full_name, e))
                 self.queue.task_done()
@@ -1358,7 +1369,13 @@ class ParquetQueryJob(object):
             self.tracker.add_result(invalid_node['table'], "FAILED", 0.0, invalid_node['reason'])
 
     def run(self):
-        input_name = os.path.splitext(os.path.basename(self.args.list))[0]
+        #input_name = os.path.splitext(os.path.basename(self.args.list))[0]
+        if self.args.list:
+            input_name = os.path.splitext(os.path.basename(self.args.list))[0]
+        else:
+            # If --table_name is used instead of --list, use a generic name for the status file
+            input_name = "list_table"
+
         status_file_filenm = "log_stat_rc_{0}_{1}.csv".format(input_name, self.global_ts)
 
         num_workers = int(self.args.concurrency)
@@ -1417,10 +1434,21 @@ if __name__ == "__main__":
     parser.add_argument('--env', default='env_config.txt')
     parser.add_argument('--master', help='Override config_master_file_path defined in env_config')
     parser.add_argument('--map', default='data_type_mapping.json')
-    parser.add_argument('--list', default='list_table.txt')
-    parser.add_argument('--table_name', help='Specific tables to run (DB|Schema.Partition)')
+    #parser.add_argument('--list', default='list_table.txt')
+    #parser.add_argument('--table_name', help='Specific tables to run (DB|Schema.Partition)')
     parser.add_argument('--concurrency', default=4, type=int)
+
+    # handle table and list as mutually exclusive arguments
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--list', help='Path to list file (e.g. list_table.txt)')
+    group.add_argument('--table_name', help='Specific tables to run (DB|Schema.Partition)')
+
+    # Parse arguments
     args = parser.parse_args()
+
+    # Set default list file if neither --list nor --table_name is provided
+    if args.list is None and args.table_name is None:
+        args.list = 'list_table.txt'
 
     def resolve_config_path(input_path, base_dir):
         if not input_path: return input_path
@@ -1428,11 +1456,16 @@ if __name__ == "__main__":
             return input_path
         return os.path.join(base_dir, 'config', input_path)
 
+    # Resolve paths
     args.env = resolve_config_path(args.env, main_path)
     if args.master is not None:
         args.master = resolve_config_path(args.master, main_path)
     args.map = resolve_config_path(args.map, main_path)
-    args.list = resolve_config_path(args.list, main_path)
+
+    #args.list = resolve_config_path(args.list, main_path)
+    if args.list is not None:
+        args.list = resolve_config_path(args.list, main_path)
+
     run_datetime = datetime.now()
     global_date_folder = run_datetime.strftime("%Y%m%d")
     global_ts = run_datetime.strftime("%Y%m%d_%H%M%S")
@@ -1456,4 +1489,10 @@ if __name__ == "__main__":
         job.run()
     except Exception as e:
         logger.critical("Job aborted due to critical error: {0}".format(e), exc_info=True)
+        print("\n" + "!" * 80)
+        print("CRITICAL FAILURE")
+        print("The script was aborted due to a critical error.")
+        print("Please check the log file for detailed information:")
+        print("Log File Location: {0}".format(os.path.abspath(log_path)))
+        print("!" * 80 + "\n")
         sys.exit(1)

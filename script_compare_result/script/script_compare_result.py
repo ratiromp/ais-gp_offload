@@ -114,7 +114,7 @@ class MonitorThread(threading.Thread):
         lines = []
         lines.append("============================================================")
         lines.append(" RECONCILE COMPARE MONITOR (Python 2.7) ")
-        lines.append(" Execution ID: {0}".format(self.tracker.execution_id)) # แสดง ID ใน Dashboard
+        lines.append(" Execution ID: {0}".format(self.tracker.execution_id))
         lines.append("============================================================")
         lines.append(" Progress: {0}/{1} ({2:.2f}%)".format(comp, total, pct))
         lines.append(" Elapsed : {0:.0f}s".format(elapsed))

@@ -380,7 +380,7 @@ class ConfigManager(object):
         table_list = ["'{0}'".format(tbl) for tbl in target_tables]
         in_clause = ",".join(table_list)
         
-        sql_query = "\\copy (SELECT database_name, original_table_name, th_column_name, COALESCE(active_flag,'Y') FROM {0} WHERE original_table_name IN ({1})) TO '{2}' WITH CSV HEADER;".format(
+        sql_query = "\\copy (SELECT database_name, original_table_name, th_column_name, COALESCE(active_flag,'Y') active_flag FROM {0} WHERE original_table_name IN ({1})) TO '{2}' WITH CSV HEADER;".format(
             self.thai_mapping_table, in_clause, self.thai_mapping_export_full_path)
         #self.logger.info("Generated SQL Query for Thai Mapping: {0}".format(sql_query))
         #cmd = [
@@ -561,6 +561,7 @@ class SparkQueryBuilder(object):
         clean_str = "regexp_replace({0}, '^[0-9]{{5,}}-', '9999-')".format(clean_str)
         clean_str = "regexp_replace({0}, '24:00:00', '23:59:59')".format(clean_str)
         clean_str = "regexp_replace({0}, '([+-][0-9]{{2}}:[0-9]{{2}}):[0-9]{{2}}', '$1')".format(clean_str)
+        clean_str = "regexp_replace({0}, '\\\\.[0-9]+', '')".format(clean_str)
 
         # Step 2: Specific Data Type Parsing
         ts_parse = ""
@@ -1046,6 +1047,77 @@ class Worker(threading.Thread):
         self.logger.info("DEBUG: new_master_info = {0}".format(new_master_info))
         return new_master_info, manual_num_err
 
+    def _summarize_columns_for_log(self, columns, type_map=None, max_items=40):
+        norm_cols = sorted(set([c.strip().lower() for c in columns if c and c.strip()]))
+        if not norm_cols:
+            return "-"
+
+        type_map = type_map or {}
+        typed_cols = ["{0}[{1}]".format(col, type_map.get(col, "unknown")) for col in norm_cols]
+
+        if len(typed_cols) <= max_items:
+            return ",".join(typed_cols)
+        preview = ",".join(typed_cols[:max_items])
+        remain = len(norm_cols) - max_items
+        return "{0},... (+{1} more)".format(preview, remain)
+
+    def _log_reconcile_column_usage(self, partition, cat_cols, parquet_columns):
+        # Keep logs compact to avoid oversized log lines on wide tables.
+        used_cols = set()
+        used_cols.update([c.strip().lower() for c in cat_cols.get('SUM_MIN_MAX', []) if c and c.strip()])
+        used_cols.update([c.strip().lower() for c in cat_cols.get('MIN_MAX', []) if c and c.strip()])
+        used_cols.update([c.strip().lower() for c in cat_cols.get('MD5_MIN_MAX', []) if c and c.strip()])
+        used_cols.update([c.strip().lower() for c in cat_cols.get('MANUAL_NUM', []) if c and c.strip()])
+
+        parquet_type_map = {}
+        parquet_cols = []
+        for col_name, spark_type in parquet_columns:
+            if col_name and col_name.strip():
+                col_key = col_name.strip().lower()
+                parquet_cols.append(col_key)
+                parquet_type_map[col_key] = spark_type
+
+        parquet_col_set = set(parquet_cols)
+        configured_type_map = cat_cols.get('TYPE_MAP', {}) or {}
+
+        display_type_map = {}
+        for col_name in parquet_col_set:
+            display_type_map[col_name] = configured_type_map.get(col_name, parquet_type_map.get(col_name, "unknown"))
+        for col_name in used_cols:
+            if col_name not in display_type_map:
+                display_type_map[col_name] = configured_type_map.get(col_name, parquet_type_map.get(col_name, "unknown"))
+
+        used_in_reconcile = sorted([c for c in used_cols if c in parquet_col_set])
+        unused_in_reconcile = sorted([c for c in parquet_col_set if c not in used_cols])
+        missing_in_parquet = sorted([c for c in used_cols if c not in parquet_col_set])
+
+        self.logger.info(
+            "[{0}] Reconcile used columns for {1} ({2}): {3}".format(
+                self.name,
+                partition,
+                len(used_in_reconcile),
+                self._summarize_columns_for_log(used_in_reconcile, display_type_map)
+            )
+        )
+        self.logger.info(
+            "[{0}] Reconcile unused columns for {1} ({2}): {3}".format(
+                self.name,
+                partition,
+                len(unused_in_reconcile),
+                self._summarize_columns_for_log(unused_in_reconcile, display_type_map)
+            )
+        )
+
+        if missing_in_parquet:
+            self.logger.warning(
+                "[{0}] Reconcile configured columns not found in parquet for {1} ({2}): {3}".format(
+                    self.name,
+                    partition,
+                    len(missing_in_parquet),
+                    self._summarize_columns_for_log(missing_in_parquet, display_type_map)
+                )
+            )
+
     def run(self):
         while(True):
             if self.abort_event.is_set():
@@ -1143,6 +1215,7 @@ class Worker(threading.Thread):
                 # Step 4: Build & Execute SparkSQL Expressions
                 self.spark.sparkContext.setJobGroup(partition, "Query: " + partition)
                 df = self.spark.read.parquet(hdfs_dest)
+                self._log_reconcile_column_usage(partition, cat_cols, df.dtypes)
                 # FOR DEBUG
                 # self.logger.info("Total rows in raw parquet (count action): {}".format(df.count()))
                 # self.logger.info("Raw Parquet Schema:")

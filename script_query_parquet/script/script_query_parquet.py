@@ -707,7 +707,7 @@ class LogParser(object):
             return latest_row, "Found SUCCEEDED record"
         elif latest_row and latest_row.get('Run_Status') == 'FAILED':
             self.logger.warning("[LogParser] Skip table {0}. Latest Export status is not SUCCEEDED.".format(target_table_with_schema))
-            return None, "Latest Export status is not SUCCEEDED"
+            return None, "SKIPPED: Latest Export status is not SUCCEEDED"
         else:
             self.logger.warning("[LogParser] Status is not SUCCEEDED in cache for {0}".format(partition))
             return None, "Status is not SUCCEEDED in any log files"

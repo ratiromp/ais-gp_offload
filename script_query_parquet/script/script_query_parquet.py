@@ -686,7 +686,7 @@ class LogParser(object):
                                     if gp_tbl == 'Greenplum_Tbl':
                                         continue
                                     
-                                    if gp_tbl and status == 'SUCCEEDED':
+                                    if gp_tbl:
                                         if gp_tbl not in self.cache[cache_key]:
                                             self.cache[cache_key][gp_tbl] = row
                                         else:
@@ -699,7 +699,6 @@ class LogParser(object):
                 self.logger.info("[LogParser] Cache build completed. Total {0} tables cached.".format(len(self.cache[cache_key])))
 
         target_table_with_schema = "{0}.{1}".format(schema, partition)
-        
         latest_row = self.cache[cache_key].get(partition) or self.cache[cache_key].get(target_table_with_schema)
         # self.logger.info(latest_row)
         if latest_row and latest_row.get('Run_Status') == 'SUCCEEDED':

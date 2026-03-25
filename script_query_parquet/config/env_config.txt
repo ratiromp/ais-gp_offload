@@ -23,3 +23,4 @@ round_double=14
 
 KEYTAB_PATH=/home/dlcdrauth/dlcdrauth.keytab
 PRINCIPAL=dlcdrauth@CORP.AIS900.ORG
+list_datatype_conv_only_no_len=chAr,Character

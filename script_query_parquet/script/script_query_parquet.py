@@ -180,7 +180,7 @@ class ConfigManager(object):
         self.thai_mapping_table = ''
         self.thai_mapping_export_path = ''
         self.thai_dict = {}
-        
+        self.list_datatype_conv_only_no_len = ()
         self.local_temp_dir = os.path.join(main_path, 'output')
         #self.nas_dest_base = os.path.join(main_path, 'output')
         #self.log_dir = os.path.join(main_path, 'log')
@@ -215,6 +215,7 @@ class ConfigManager(object):
                         elif key == 'gp_db': self.gp_db = value
                         elif key == 'thai_mapping_table': self.thai_mapping_table = value
                         elif key == 'thai_mapping_export_path': self.thai_mapping_export_path = value
+                        elif key == 'list_datatype_conv_only_no_len': self.list_datatype_conv_only_no_len = set(value.strip().lower().split(','))
                         elif key in self.env_params:
                             self.env_params[key] = int(value)
         except IOError as e:
@@ -686,7 +687,7 @@ class LogParser(object):
                                     if gp_tbl == 'Greenplum_Tbl':
                                         continue
                                     
-                                    if gp_tbl and status == 'SUCCEEDED':
+                                    if gp_tbl:
                                         if gp_tbl not in self.cache[cache_key]:
                                             self.cache[cache_key][gp_tbl] = row
                                         else:
@@ -699,7 +700,6 @@ class LogParser(object):
                 self.logger.info("[LogParser] Cache build completed. Total {0} tables cached.".format(len(self.cache[cache_key])))
 
         target_table_with_schema = "{0}.{1}".format(schema, partition)
-        
         latest_row = self.cache[cache_key].get(partition) or self.cache[cache_key].get(target_table_with_schema)
         # self.logger.info(latest_row)
         if latest_row and latest_row.get('Run_Status') == 'SUCCEEDED':
@@ -708,7 +708,7 @@ class LogParser(object):
             return latest_row, "Found SUCCEEDED record"
         elif latest_row and latest_row.get('Run_Status') == 'FAILED':
             self.logger.warning("[LogParser] Skip table {0}. Latest Export status is not SUCCEEDED.".format(target_table_with_schema))
-            return None, "Latest Export status is not SUCCEEDED"
+            return None, "SKIPPED: Latest Export status is not SUCCEEDED"
         else:
             self.logger.warning("[LogParser] Status is not SUCCEEDED in cache for {0}".format(partition))
             return None, "Status is not SUCCEEDED in any log files"
@@ -788,13 +788,11 @@ class MetadataFetcher(object):
 
     def fetch_data_types(self, db_name, table_name):
         if not self.base_dir or not os.path.exists(self.base_dir): return None
-        
         target_dir = os.path.join(self.base_dir, db_name)
         if not os.path.exists(target_dir): return None
-            
         matches = [os.path.join(r, f) for r, _, fs in os.walk(target_dir) for f in fs if f.endswith("_data_type.txt") and table_name in f]
         latest_file = sorted(matches)[-1] if matches else None
-        
+  
         type_map = {}
         if latest_file:
             try:
@@ -914,7 +912,6 @@ class Worker(threading.Thread):
         self.reconcile_method = []
         self.status = ""
         self.error_message = ""
-
     def _copy_file_to_nas(self, local_file_path, db, schema, target_file_name):
         nas_dir = os.path.join(self.config.nas_destination, db, schema)
         nas_file_path = os.path.join(nas_dir, target_file_name)
@@ -1209,6 +1206,9 @@ class Worker(threading.Thread):
                             cat_cols['MIN_MAX'].append(col)
                             self.reconcile_method.append('dttm_min_max')
                         elif gp_base in self.config.type_mapping.get("MD5_MIN_MAX", []):
+                            cat_cols['MD5_MIN_MAX'].append(col)
+                            self.reconcile_method.append('md5_min_max')
+                        elif gp_base in self.config.list_datatype_conv_only_no_len and '(' not in gp_dt:
                             cat_cols['MD5_MIN_MAX'].append(col)
                             self.reconcile_method.append('md5_min_max')
 

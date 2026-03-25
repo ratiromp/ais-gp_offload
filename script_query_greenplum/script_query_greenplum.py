@@ -297,6 +297,7 @@ class Config(object):
                         elif key == 'thai_mapping_table': self.thai_mapping_table = value
                         elif key == 'thai_mapping_export_path': self.thai_mapping_export_path = value
                         elif key == 'succeed_path': self.succeed_path = value
+                        elif key == 'list_datatype_conv_only_no_len': self.list_datatype_conv_only_no_len = [v.strip().lower() for v in value.split(',')]
                         elif key in self.env_params:
                             self.env_params[key] = int(value)
                 
@@ -593,7 +594,7 @@ class QueryBuilder(object):
 
             # 2. DATE Solution
             for col in sorted(all_date_cols):
-                gp_type = categorized_cols['TYPE_MAP'].get(col, 'text')
+                gp_type = categorized_cols['TYPE_MAP'].get(col, 'text') #fncheck#
                 base_expr = insert_logic_dict.get(col, '"{0}"'.format(col))
                 min_expr = "MIN({0})::text".format(base_expr)
                 max_expr = "MAX({0})::text".format(base_expr)
@@ -879,6 +880,7 @@ class Worker(threading.Thread):
             self.start_time_tbl = time.time()
             self.start_ts_tbl = datetime.fromtimestamp(self.start_time_tbl).strftime("%Y-%m-%d %H:%M:%S")
             self.reconcile_method = ['count']
+            manual_num_err = []
             
             for attempt in range(1, max_retries + 1):
                 # Reset error message for each attempt
@@ -964,6 +966,9 @@ class Worker(threading.Thread):
                                             cat_cols['MIN_MAX'].append(col_nm)
                                             self.reconcile_method.append('dttm_min_max')
                                         elif gp_base in md5_map:
+                                            cat_cols['MD5_MIN_MAX'].append(col_nm)
+                                            self.reconcile_method.append('md5_min_max')
+                                        elif gp_base in self.config.list_datatype_conv_only_no_len and '(' not in gp_dt:
                                             cat_cols['MD5_MIN_MAX'].append(col_nm)
                                             self.reconcile_method.append('md5_min_max')
 

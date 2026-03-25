@@ -3,6 +3,7 @@ succeed_log_pq_path=/home/MNT_NFS/GP_DWS/mig_reconcile_query_parquet_output/
 replace_path_from=/MNT/GP_DWS/
 replace_path_to=/home/MNT_NFS/GP_DWS/
 
-compare_report_path=/path/to/nas/output/compare_reports/
-hive_header_table=ais_gpoffload_reconcile.log_reconcile_status_count
-hive_detail_table=ais_gpoffload_reconcile.log_reconcile_result_content
+conda_activate_cmd=source /opt/anaconda37/bin/activate
+kinit=kinit -kt /home/dlcdrauth/dlcdrauth.keytab dlcdrauth@CORP.AIS900.ORG
+hive_status_table=/data/gpoffload/reconcile/ais_gpoffload_reconcile/log_reconcile_status_count
+hive_result_table=/data/gpoffload/reconcile/ais_gpoffload_reconcile/log_reconcile_result_content

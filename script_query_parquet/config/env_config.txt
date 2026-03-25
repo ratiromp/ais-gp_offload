@@ -1,3 +1,4 @@
+local_temp_dir=/data/AIS-EDW/gpoffload/script_reconcile_query_parquet/output/
 succeed_path=/home/MNT_NFS/GP_DWS/mig_stat_log/
 hdfs_path=/data/gpoffload/data_recon
 replace_path_from=/MNT/GP_DWS/
@@ -7,7 +8,7 @@ nas_destination=/home/MNT_NFS/GP_DWS/mig_reconcile_query_parquet_output/
 config_master_file_path=/home/MNT_NFS/GP_DWS/mig_reconcile_config/config_master.txt
 mapping_file_path=/home/MNT_NFS/GP_DWS/mig_reconcile_config/data_type_mapping.json
 gp_db=prodgp
-thai_mapping_table=prodgp.gpoffload.gp_list_th_col_handle_th
+thai_mapping_table=prodgp.gpoffload.gp_list_th_col 
 thai_mapping_export_path=/data/AIS-EDW/gpoffload/script_reconcile_query_parquet/temp/
 
 default_numeric_p=38
@@ -19,3 +20,6 @@ cast_double_s=15
 round_numeric=10
 round_real=5
 round_double=14
+
+KEYTAB_PATH=/home/dlcdrauth/dlcdrauth.keytab
+PRINCIPAL=dlcdrauth@CORP.AIS900.ORG

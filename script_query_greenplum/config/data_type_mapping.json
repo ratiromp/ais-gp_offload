@@ -1,5 +1,5 @@
 {
   "SUM_MIN_MAX": ["numeric", "double precision", "real", "smallint"],
   "MIN_MAX": ["time without time zone", "time with time zone", "timestamp with time zone", "timestamp without time zone", "date"],
-  "MD5_MIN_MAX": ["interval", "bit", "bytea", "thai_col_flag_y", "thai_col_flag_n", "json", "xml", "point", "polygon", "array[]"]
+  "MD5_MIN_MAX": ["interval", "bit", "bytea", "thai_col_flag_y", "thai_col_flag_n", "json", "xml", "point", "polygon", "array"]
 }

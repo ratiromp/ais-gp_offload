@@ -710,8 +710,8 @@ class LogParser(object):
             self.logger.warning("[LogParser] Skip table {0}. Latest Export status is not SUCCEEDED.".format(target_table_with_schema))
             return None, "SKIPPED: Latest Export status is not SUCCEEDED"
         else:
-            self.logger.warning("[LogParser] Status is not SUCCEEDED in cache for {0}".format(partition))
-            return None, "Status is not SUCCEEDED in any log files"
+            self.logger.warning("[LogParser] Not found any Export Status of table: {0}".format(partition))
+            return None, "SKIPPED: Not found any Export Status"
     
 class HDFSHandler(object):
     def __init__(self, spark_session, logger):

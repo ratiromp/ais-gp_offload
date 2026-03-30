@@ -1,21 +1,17 @@
-# 1. Ignore ทุกอย่างในโปรเจกต์ (รวมถึงไฟล์และโฟลเดอร์)
 /*
 
-# 2. ยกเว้นไฟล์ .gitignore เอง เพื่อให้เรายัง track การตั้งค่านี้ได้
 !.gitignore
 
-# 3. เปิดประตู (Un-ignore) โฟลเดอร์ที่เป็นทางผ่าน
-# ต้องไล่เปิดทีละชั้น Git ถึงจะมองเห็นไฟล์ข้างในครับ
 !/script_query_greenplum/
 !/script_query_parquet/
 !/script_compare_result/
-# 4. (ทางเลือก) สั่ง Ignore ของที่อยู่ในโฟลเดอร์เหล่านั้นทั้งหมดก่อน 
-# เพื่อที่เราจะเลือกเจาะจงเฉพาะไฟล์ในขั้นตอนถัดไป
+!/script_hdfs_housekeeping/
+
 /script_query_greenplum/*
 /script_query_parquet/script/*
 /script_compare_result/script/*
+/script_hdfs_housekeeping/script/*
 
-# 5. ยกเว้น (Keep) ไฟล์ที่คุณต้องการจริงๆ
 !/script_query_greenplum/script_query_greenplum.py
 !/script_query_greenplum/config/config_master.txt
 !/script_query_greenplum/config/data_type_mapping.json
@@ -26,9 +22,9 @@
 !/script_compare_result/config/env_config.txt
 !/script_compare_result/script/script_compare_result.py
 !/script_compare_result/script/parquet_writer.py
+!/script_hdfs_housekeeping/script/script_hdfs_housekeeping.py
 
-
-# หากต้องการเก็บไฟล์ทั้งหมดในโฟลเดอร์ config ให้ใช้แบบนี้
 !/script_query_greenplum/config/
 !/script_query_parquet/config/
 !/script_compare_result/config/
+!/script_hdfs_housekeeping/config/

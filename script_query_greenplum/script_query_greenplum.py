@@ -631,7 +631,7 @@ class QueryBuilder(object):
                 " '\"count\": ' || COUNT(*)::text || ', ' || "
                 " '\"methods\": {{' || {1} || '}}' || "
                 " '}}' "
-                "FROM {2}.{3};"
+                "FROM \"{2}\".\"{3}\";"
             ).format(full_table_name, metrics_sql, schema, table)
 
             filename = "query_{0}_{1}_{2}_{3}.sql".format(db, schema, table, self.global_ts)

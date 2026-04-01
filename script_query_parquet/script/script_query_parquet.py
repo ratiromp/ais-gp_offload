@@ -730,55 +730,71 @@ class HDFSHandler(object):
 
     def sync_parquet(self, local_file_path, hdfs_dest_path):
         self.logger.info("[HDFSHandler] Evaluating HDFS sync. Local: {0} -> HDFS: {1}".format(local_file_path, hdfs_dest_path))
-        try:
-            local_mtime = os.path.getmtime(local_file_path)
-        except OSError as e:
-            raise ValueError("SKIPPED: Local path not found or inaccessible: {0}".format(local_file_path))
-        
+
+        # Guard: local path must exist
+        if not os.path.exists(local_file_path):
+            raise ValueError("FAILED: Local path not found or inaccessible: {0}".format(local_file_path))
+
+        # Guard: at least one .parquet file must be present
         has_parquet = False
         if os.path.isdir(local_file_path):
             for root, dirs, files in os.walk(local_file_path):
                 if any(f.endswith('.parquet') for f in files):
                     has_parquet = True
                     break
-        else:
-            if local_file_path.endswith('.parquet'):
-                has_parquet = True
-                
-        if not has_parquet:
-            raise ValueError("SKIPPED: No parquet files found in local path (or sub-folders): {0}".format(local_file_path))
 
-        local_path_str = "file:///" + os.path.abspath(local_file_path).replace("\\", "/").lstrip("/")
-        local_path_obj = self.Path(local_path_str)
-        hdfs_path_obj = self.Path(hdfs_dest_path)
+        if not has_parquet:
+            raise ValueError("FAILED: No parquet files found in local path (or sub-folders): {0}".format(local_file_path))
+
+        # --- Directory path ---
+        # PXF exports produce random filenames on every run, so per-file name matching between
+        # local and HDFS is impossible. Use folder-level mtime: if local folder is newer than
+        # the HDFS folder, delete the stale HDFS folder and re-upload the entire directory.
+        try:
+            local_dir_mtime = os.path.getmtime(local_file_path)
+        except OSError as e:
+            raise ValueError("FAILED: Cannot read local directory mtime: {0}".format(e))
+
+        local_dir_obj = self.Path("file:///" + os.path.abspath(local_file_path).replace("\\", "/").lstrip("/"))
+        hdfs_dir_obj = self.Path(hdfs_dest_path)
 
         needs_upload = False
 
-        if not self.fs.exists(hdfs_path_obj):
+        if not self.fs.exists(hdfs_dir_obj):
+            # HDFS destination does not exist yet — fresh upload
             needs_upload = True
+            self.logger.info("[HDFSHandler] HDFS destination does not exist. Will upload directory.")
         else:
             try:
-                file_status = self.fs.getFileStatus(hdfs_path_obj)
-                hdfs_mtime = file_status.getModificationTime() / 1000.0
-
-                if local_mtime > hdfs_mtime:
+                hdfs_dir_mtime = self.fs.getFileStatus(hdfs_dir_obj).getModificationTime() / 1000.0
+                if local_dir_mtime > hdfs_dir_mtime:
                     needs_upload = True
+                    self.logger.info("[HDFSHandler] Local folder is newer (local={0:.0f} > hdfs={1:.0f}). Will replace HDFS directory.".format(
+                        local_dir_mtime, hdfs_dir_mtime))
+                else:
+                    self.logger.info("[HDFSHandler] HDFS directory is up-to-date. Skipping upload.")
             except Exception as e:
-                self.logger.warning("Could not get HDFS file status via JVM. Forcing upload. Error: {0}".format(e))
+                self.logger.warning("[HDFSHandler] Cannot get HDFS directory mtime. Forcing upload. Error: {0}".format(e))
                 needs_upload = True
 
         if needs_upload:
-            self.logger.info("[HDFSHandler] Proceeding to upload Parquet to HDFS: {0}".format(hdfs_dest_path))
             try:
-                parent_path = hdfs_path_obj.getParent()
-                if parent_path and not self.fs.exists(parent_path):
-                    self.fs.mkdirs(parent_path)
-                
-                self.fs.copyFromLocalFile(False, True, local_path_obj, hdfs_path_obj)
+                # Remove stale HDFS directory (recursive) so random-named old files do not linger
+                if self.fs.exists(hdfs_dir_obj):
+                    self.logger.info("[HDFSHandler] Deleting stale HDFS directory: {0}".format(hdfs_dest_path))
+                    self.fs.delete(hdfs_dir_obj, True)  # True = recursive
+
+                # Ensure HDFS parent directory exists before upload
+                hdfs_parent = hdfs_dir_obj.getParent()
+                if hdfs_parent and not self.fs.exists(hdfs_parent):
+                    self.fs.mkdirs(hdfs_parent)
+
+                self.logger.info("[HDFSHandler] Uploading directory to HDFS: {0} -> {1}".format(local_file_path, hdfs_dest_path))
+                self.fs.copyFromLocalFile(False, True, local_dir_obj, hdfs_dir_obj)
+                self.logger.info("[HDFSHandler] Directory upload complete: {0}".format(hdfs_dest_path))
             except Exception as e:
-                raise RuntimeError("HDFS copyFromLocalFile via JVM failed: {0}".format(e))
-        else:
-            self.logger.info("[HDFSHandler] Parquet file is up-to-date. Skipping HDFS upload.")
+                raise RuntimeError("HDFS directory upload failed: {0}".format(e))
+
         return True
 
 class MetadataFetcher(object):

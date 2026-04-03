@@ -174,6 +174,7 @@ class ConfigManager(object):
         self.metadata_base_dir = ''
         self.datatype_mapping_path = ''
         self.nas_destination = ''  # Default to prevent AttributeError if missing from env_config
+        self.hdfs_replication = '1'
         self.mapping_file_path = ''
         self.master_file_path = ''
         self.gp_db = ''
@@ -210,6 +211,7 @@ class ConfigManager(object):
                         elif key == 'replace_path_to': self.replace_path_to = value
                         elif key == 'metadata_base_dir': self.metadata_base_dir = value
                         elif key == 'nas_destination': self.nas_destination = value
+                        elif key == 'hdfs_replication': self.hdfs_replication = value
                         elif key == 'mapping_file_path': self.mapping_file_path = value
                         elif key == 'config_master_file_path': self.master_file_path = value
                         elif key == 'gp_db': self.gp_db = value
@@ -714,9 +716,10 @@ class LogParser(object):
             return None, "SKIPPED: Not found any Export Status"
     
 class HDFSHandler(object):
-    def __init__(self, spark_session, logger):
+    def __init__(self, spark_session, logger, replication="1"):
         self.logger = logger
         self.spark = spark_session
+        self.replication = replication
 
         # JVM filesystem init can fail if Kerberos ticket expired or Hadoop config missing
         try:
@@ -790,12 +793,29 @@ class HDFSHandler(object):
                     self.fs.mkdirs(hdfs_parent)
 
                 self.logger.info("[HDFSHandler] Uploading directory to HDFS: {0} -> {1}".format(local_file_path, hdfs_dest_path))
-                self.fs.copyFromLocalFile(False, True, local_dir_obj, hdfs_dir_obj)
-                self.logger.info("[HDFSHandler] Directory upload complete: {0}".format(hdfs_dest_path))
+                # Mirror: hdfs dfs -D dfs.replication=1 -put
+                # newInstance bypasses the FileSystem cache so a fresh DFSClient reads dfs.replication=1
+                # at construction — hadoop_conf.set() alone has no effect because DFSClient stores
+                # defaultReplication as a primitive short copied once at construction from the cached FS.
+                upload_conf = self.sc._jvm.org.apache.hadoop.conf.Configuration(self.hadoop_conf)
+                upload_conf.set("dfs.replication", self.replication)
+                upload_conf.set("io.file.buffer.size", "4194304")
+                upload_fs = self.sc._jvm.org.apache.hadoop.fs.FileSystem.newInstance(
+                    hdfs_dir_obj.toUri(), upload_conf)
+                # Timer isolates actual I/O cost of the put step
+                hdfs_t0 = time.time()
+                try:
+                    upload_fs.copyFromLocalFile(False, True, local_dir_obj, hdfs_dir_obj)
+                finally:
+                    upload_fs.close()
+                hdfs_put_s = time.time() - hdfs_t0
+                self.logger.info("[HDFSHandler] Directory upload complete: {0} (put_duration={1:.2f}s)".format(hdfs_dest_path, hdfs_put_s))
             except Exception as e:
                 raise RuntimeError("HDFS directory upload failed: {0}".format(e))
 
-        return True
+            return (True, hdfs_put_s)
+
+        return (False, 0.0)
 
 class MetadataFetcher(object):
     def __init__(self, base_dir, logger):
@@ -1184,7 +1204,11 @@ class Worker(threading.Thread):
 
                 # Step 2: HDFS Sync
                 hdfs_dest = os.path.join(self.config.hdfs_path, db, schema, partition)
-                self.hdfs_h.sync_parquet(local_file_path, hdfs_dest)
+                uploaded, hdfs_put_s = self.hdfs_h.sync_parquet(local_file_path, hdfs_dest)
+                self.logger.info("[{0}] HDFS sync for {1}: uploaded={2}, put_duration={3:.2f}s".format(
+                    self.name, partition, uploaded, hdfs_put_s))
+                print("[{0}] HDFS sync for {1}: uploaded={2}, put_duration={3:.2f}s".format(
+                    self.name, partition, uploaded, hdfs_put_s))
 
                 # Step 3: Fetch Metadata & Categorize
                 type_map = self.meta_fetcher.fetch_data_types(db, base_table)
@@ -1469,13 +1493,15 @@ class ParquetQueryJob(object):
                 .config("spark.scheduler.mode", "FAIR").enableHiveSupport().getOrCreate()
             self.spark.sparkContext.setLogLevel("ERROR")
             self.execution_id = self.spark.sparkContext.applicationId
+            self.logger.info("YARN_APP_ID: {0}".format(self.execution_id))
+            print("YARN_APP_ID: {0}".format(self.execution_id))
         except Exception as e:
             self.logger.critical("CRITICAL_FAILED: SparkSession initialization failed: {0}".format(e))
             raise RuntimeError("CRITICAL_FAILED: Cannot create SparkSession: {0}".format(e))
 
         # Init Handlers
         self.log_parser = LogParser(self.config.succeed_path, logger)
-        self.hdfs_h = HDFSHandler(self.spark, logger)
+        self.hdfs_h = HDFSHandler(self.spark, logger, self.config.hdfs_replication)
         self.meta_fetcher = MetadataFetcher(self.config.metadata_base_dir, logger)
         self.query_builder = SparkQueryBuilder(self.config.env_params, self.config.type_mapping, logger)
         self.hive_logger = HiveLogger(self.spark, logger)

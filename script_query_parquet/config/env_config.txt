@@ -21,6 +21,7 @@ round_numeric=10
 round_real=5
 round_double=14
 
+hdfs_replication=1
 KEYTAB_PATH=/home/dlcdrauth/dlcdrauth.keytab
 PRINCIPAL=dlcdrauth@CORP.AIS900.ORG
 list_datatype_conv_only_no_len=chAr,Character

@@ -133,7 +133,7 @@ class ProcessTracker(object):
         # print("Output   : {0}".format(summary_file))
         print("="*80)
 
-def setup_logging(log_dir, log_name="app", timestamp=None):
+def setup_logging(log_dir, log_name="app", timestamp=None, run_id=None):
     if not os.path.exists(log_dir):
         try:
             os.makedirs(log_dir)
@@ -141,7 +141,10 @@ def setup_logging(log_dir, log_name="app", timestamp=None):
             print("WARNING: Could not create log directory '{0}'. Error: {1}".format(log_dir, e))
             log_dir = '.'
 
-    log_file = os.path.join(log_dir, "{0}_{1}.log".format(log_name, timestamp))
+    # Append first 8 chars of run_id to guarantee a unique log file per instance
+    # even when two scripts start within the same second
+    uid_suffix = "_{0}".format(run_id[:8]) if run_id else ""
+    log_file = os.path.join(log_dir, "{0}_{1}{2}.log".format(log_name, timestamp, uid_suffix))
     logger = logging.getLogger("ParquetQueryBatch")
     logger.setLevel(logging.INFO)
     logger.handlers = []
@@ -1687,7 +1690,7 @@ if __name__ == "__main__":
         except OSError as e:
             print("WARNING: Could not create output directory '{0}'. Using current directory. Error: {1}".format(final_out_dir, e))
     
-    logger, log_path = setup_logging(final_log_dir, 'reconcile_query_parquet', global_ts)
+    logger, log_path = setup_logging(final_log_dir, 'reconcile_query_parquet', global_ts, run_id)
     logger.info("Started Reconcile script with concurrency: {0}".format(args.concurrency))
     logger.info("Run ID: {0}".format(run_id))
 

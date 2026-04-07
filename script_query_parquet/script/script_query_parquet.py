@@ -1106,7 +1106,7 @@ class Worker(threading.Thread):
         except Exception as e:
             return False, str(e)
 
-    def logging_status(self, status, remark="", nas_json_path="", hdfs_path=""):
+    def logging_status(self, status, remark="-", nas_json_path="-", hdfs_path="-"):
         # 1. Define directory path
         # temp status directory: /output/<date>/stat_csv/<db>/<schema>
         status_dir = os.path.join(self.config.local_temp_dir, 'stat_csv', self.db, self.schema)
@@ -1178,7 +1178,6 @@ class Worker(threading.Thread):
             statused, 
             remark, 
             nas_json_path, 
-            "",  # remark
             hdfs_path
             ] 
 
@@ -1324,6 +1323,67 @@ class Worker(threading.Thread):
                 self.name, hdfs_dest, e))
             return hdfs_dest  # safe fallback
 
+    def _read_hdfs_sync_status(self, db, schema, partition):
+        """Scan log_stat_rc_*.csv files; collect all rows for this partition where
+        reconcile_method contains 'hdfs_sync'; sort by end_ts (col[2]) to get the
+        chronologically latest row; return (hdfs_path, status). Returns ('','') if
+        no matching row is found across all stat files."""
+        stat_dir = os.path.join(self.config.local_temp_dir, 'stat_csv', db, schema)
+        pattern = os.path.join(stat_dir, 'log_stat_rc_*.csv')
+        matched_files = glob.glob(pattern)
+        target_short = "{0}.{1}".format(schema, partition)
+        all_rows = []
+        for fpath in matched_files:
+            try:
+                with open(fpath, 'rb') as f:
+                    reader = csv.reader(f)
+                    for row in reader:
+                        if len(row) < 10:
+                            continue
+                        if (row[0].strip() == target_short
+                                and 'hdfs_sync' in row[4].strip()):
+                            all_rows.append(row)
+            except Exception as e:
+                self.logger.warning("[{0}] _read_hdfs_sync_status: error reading {1}: {2}".format(
+                    self.name, fpath, e))
+        if not all_rows:
+            return ("", "")
+        # Sort by end_ts (col [2], '%Y-%m-%d %H:%M:%S') — ISO lexicographic order is deterministic
+        all_rows.sort(key=lambda r: r[2].strip())
+        latest = all_rows[-1]
+        return (latest[9].strip(), latest[5].strip())
+
+    def _hdfs_has_parquet(self, hdfs_path):
+        """Return True if at least one .parquet file exists anywhere under hdfs_path.
+        Swallows all JVM and filesystem errors, returning False on any exception."""
+        try:
+            dir_obj = self.hdfs_h.Path(hdfs_path)
+            if not self.hdfs_h.fs.exists(dir_obj):
+                return False
+            found = [False]
+
+            def _walk(path_obj):
+                if found[0]:
+                    return
+                try:
+                    statuses = self.hdfs_h.fs.listStatus(path_obj)
+                except Exception:
+                    return
+                for st in statuses:
+                    if found[0]:
+                        return
+                    if st.isDirectory():
+                        _walk(st.getPath())
+                    elif st.isFile() and st.getPath().getName().endswith('.parquet'):
+                        found[0] = True
+
+            _walk(dir_obj)
+            return found[0]
+        except Exception as e:
+            self.logger.warning("[{0}] _hdfs_has_parquet error for {1}: {2}".format(
+                self.name, hdfs_path, e))
+            return False
+
     def run(self):
         while(True):
             if self.abort_event.is_set():
@@ -1368,11 +1428,16 @@ class Worker(threading.Thread):
                 if not log_row:
                     raise ValueError(log_msg)
 
-                # Step 2: Verify HDFS path exists (query mode does not upload)
-                hdfs_dest = os.path.join(self.config.hdfs_path, db, schema, partition)
-                if not self.hdfs_h.fs.exists(self.hdfs_h.Path(hdfs_dest)):
-                    raise ValueError("SKIPPED: HDFS path does not exist: {0}".format(hdfs_dest))
-                self.logger.info("[{0}] HDFS path verified: {1}".format(self.name, hdfs_dest))
+                # Step 2: Verify HDFS sync record exists and is SUCCEEDED, then confirm .parquet files present
+                hdfs_from_stat, sync_status = self._read_hdfs_sync_status(db, schema, partition)
+                if not sync_status:
+                    raise ValueError("SKIPPED: No HDFS sync record found for {0}".format(partition))
+                if sync_status != "SUCCEEDED":
+                    raise ValueError("FAILED: Latest status of HDFS Sync is not SUCCEEDED.")
+                hdfs_dest = hdfs_from_stat
+                if not self._hdfs_has_parquet(hdfs_dest):
+                    raise ValueError("SKIPPED: No .parquet files at HDFS path: {0}".format(hdfs_dest))
+                self.logger.info("[{0}] HDFS pre-check passed: {1}".format(self.name, hdfs_dest))
 
                 # Step 3: Fetch Metadata & Categorize
                 type_map = self.meta_fetcher.fetch_data_types(db, base_table)
@@ -1772,7 +1837,7 @@ class UploadWorker(threading.Thread):
 
 class MonitorThread(threading.Thread):
     _DASH_WIDTH = 120  # total dashboard column width — change to match your terminal
-    _BAR_WIDTH = 30   # characters for the upload progress bar
+    _BAR_WIDTH = 15   # characters for the upload progress bar
 
     def __init__(self, tracker, num_workers, log_path, app_id="N/A", title="PARQUET JOB MONITOR"):
         threading.Thread.__init__(self)
@@ -1795,7 +1860,7 @@ class MonitorThread(threading.Thread):
         self.print_dashboard()
 
     @staticmethod
-    def _render_bar(done, total, width=20):
+    def _render_bar(done, total, width=15):
         """Render a text progress bar: [=====>..........] 35%"""
         if total <= 0:
             return "[{0}]".format("." * width)
@@ -2060,7 +2125,7 @@ class HDFSSyncJob(object):
             input_name = "list_table"
 
         # Distinct 'hdfs' prefix keeps upload stat files separate from reconcile stat files
-        status_file_filenm = "log_stat_hdfs_{0}_{1}.csv".format(input_name, self.global_ts)
+        status_file_filenm = "log_stat_rc_{0}_{1}.csv".format(input_name, self.global_ts)
 
         num_workers = int(self.args.concurrency)
         workers = []

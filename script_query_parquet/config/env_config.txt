@@ -22,7 +22,7 @@ round_real=5
 round_double=14
 
 hdfs_replication=2
-hdfs_put_parallelism=5
+hdfs_put_parallelism=20
 
 spark_executor_cores=2
 spark_executor_memory=4g

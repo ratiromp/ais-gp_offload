@@ -186,6 +186,7 @@ class ConfigManager(object):
         self.datatype_mapping_path = ''
         self.nas_destination = ''  # Default to prevent AttributeError if missing from env_config
         self.hdfs_replication = '1'
+        self.hdfs_put_parallelism = 20  # default; overridden by hdfs_put_parallelism in env_config
         self.mapping_file_path = ''
         self.master_file_path = ''
         self.gp_db = ''
@@ -223,6 +224,7 @@ class ConfigManager(object):
                         elif key == 'metadata_base_dir': self.metadata_base_dir = value
                         elif key == 'nas_destination': self.nas_destination = value
                         elif key == 'hdfs_replication': self.hdfs_replication = value
+                        elif key == 'hdfs_put_parallelism': self.hdfs_put_parallelism = int(value)
                         elif key == 'mapping_file_path': self.mapping_file_path = value
                         elif key == 'config_master_file_path': self.master_file_path = value
                         elif key == 'gp_db': self.gp_db = value
@@ -458,31 +460,6 @@ class ConfigManager(object):
             err_msg = "Unexpected error when running psql: {0}".format(e).replace("\n", " ")
             self.logger.error(err_msg)
             return False
-        
-    #def _load_thai_mapping(self):
-    #    if not os.path.exists(self.thai_mapping_export_full_path):
-    #        self.logger.warning("Thai mapping file not found at {0}".format(self.thai_mapping_export_full_path))
-    #        return
-    #    
-    #    try:
-    #        with open(self.thai_mapping_export_full_path, 'r') as f:
-    #            reader = csv.DictReader(f)
-    #            for row in reader:
-    #                db = row.get('database_name', '').strip().lower()
-    #                tbl_raw = row.get('original_table_name', '').strip().lower()
-    #                if '.' in tbl_raw:
-    #                    tbl = tbl_raw.split('.')[-1]
-    #                else:
-    #                    tbl = tbl_raw
-    #                col = row.get('th_column_name', '').strip().lower()
-    #                flag = row.get('active_flag', '').strip().upper()
-    #                if db and tbl and col:
-    #                    if (db, tbl) not in self.thai_dict:
-    #                        self.thai_dict[(db, tbl)] = {}
-    #                    self.thai_dict[(db, tbl)][col] = flag
-    #        self.logger.info("Loaded Thai mapping configuration for {0} tables.".format(len(self.thai_dict)))
-    #    except Exception as e:
-    #        self.logger.error("Error loading Thai mapping CSV: {0}".format(e))
 
     def _load_thai_mapping(self):
         if not os.path.exists(self.thai_mapping_export_full_path): return
@@ -542,29 +519,6 @@ class SparkQueryBuilder(object):
             agg_func, col, p, s, r
         )
 
-    # def _build_date_expr(self, agg_func, col, gp_type):
-    #     """ REQ 5.2: Date/Time Type with Regex and Named Struct logic """
-    #     # Step 1: Base Regex Cleansing (Handles year > 9999 and 24:00:00)
-    #     clean_str = "regexp_replace(regexp_replace(CAST(`{0}` AS STRING), '^[0-9]{{5,}}-', '9999-'), '24:00:00', '23:59:59')".format(col)
-
-    #     # Step 2: Specific Data Type Parsing (Determine Timestamp Format)
-    #     ts_parse = ""
-    #     gp_base = gp_type.split('(')[0].strip().lower()
-    #     if 'timestamp' in gp_base:
-    #         ts_parse = "CASE WHEN `{0}` LIKE '% BC' THEN to_timestamp({1}, 'yyyy-MM-dd HH:mm:ss G') ELSE to_timestamp({1}) END".format(col, clean_str)
-    #     elif 'date' in gp_base:
-    #         ts_parse = "CASE WHEN `{0}` LIKE '% BC' THEN to_timestamp({1}, 'yyyy-MM-dd G') ELSE to_timestamp({1}, 'yyyy-MM-dd') END".format(col, clean_str)
-    #     elif 'time' in gp_base:
-    #         ts_parse = "to_timestamp(concat('1970-01-01 ', {0}))".format(clean_str)
-    #     else:
-    #         ts_parse = "to_timestamp({0})".format(clean_str)
-
-    #     # Step 3: Build Struct for Aggregation
-    #     struct_expr = "CASE WHEN {0} IS NULL THEN NULL ELSE named_struct('ts', {0}, 'val', CAST(`{1}` AS STRING)) END".format(ts_parse, col)
-
-    #     # Step 4: Extract Aggregated Value
-    #     return "{0}({1}).val".format(agg_func, struct_expr)
-    
     def _build_date_expr(self, agg_func, col, gp_type):
         # Step 1: Base Regex Cleansing
         clean_str = "CAST(`{0}` AS STRING)".format(col)
@@ -622,14 +576,6 @@ class SparkQueryBuilder(object):
         all_num_cols = set(cat_cols['SUM_MIN_MAX'] + cat_cols['MANUAL_NUM'])
         all_date_cols = set(cat_cols['MIN_MAX'])
         all_cpx_cols = set(cat_cols['MD5_MIN_MAX'])
-
-        # Discard Logic (Prevent Duplicates)
-        #for col in all_num_cols:
-        #    all_date_cols.discard(col)
-        #    all_cpx_cols.discard(col)
-        #for col in all_date_cols:
-        #    all_cpx_cols.discard(col)
-        
         # 1. SUM_MIN_MAX
         for col in all_num_cols:
             gp_type = cat_cols['TYPE_MAP'].get(col, 'numeric')
@@ -723,12 +669,12 @@ class LogParser(object):
             return None, "SKIPPED: Not found any Export Status"
     
 class HDFSHandler(object):
-    _PUT_PARALLEL = 20  # Per-table file upload parallelism
 
-    def __init__(self, spark_session, logger, replication="1"):
+    def __init__(self, spark_session, logger, replication="1", put_parallel=20):
         self.logger = logger
         self.spark = spark_session
         self.replication = replication
+        self._put_parallel = put_parallel  # per-table file upload parallelism, set from env_config
 
         # JVM filesystem init can fail if Kerberos ticket expired or Hadoop config missing
         try:
@@ -841,7 +787,7 @@ class HDFSHandler(object):
                         file_pairs.append((local_abs, hdfs_file))
 
                 num_files = len(file_pairs)
-                parallelism = min(self._PUT_PARALLEL, num_files) if num_files > 0 else 1
+                parallelism = min(self._put_parallel, num_files) if num_files > 0 else 1
                 log.info("[HDFSHandler] Uploading {0} files: {1} -> {2} (parallelism={3})".format(
                     num_files, local_file_path, hdfs_dest_path, parallelism))
 
@@ -1069,20 +1015,6 @@ class HiveLogger(object):
             with self.insert_lock: self.spark.sql(insert_sql)
         except Exception as e:
             self.logger.warning("Hive Log Insert Failed: {0}".format(e))
-
-
-#class FileHandler(object):
-#    def __init__(self, logger):
-#        self.logger = logger
-#    def copy_to_nas(self, src, dest_dir):
-#        if not os.path.exists(dest_dir):
-#            try:
-#                os.makedirs(dest_dir)
-#            except OSError:
-#                pass
-#        self.logger.info("Copying file from {0} to NAS: {1}".format(src, dest_dir))
-#        shutil.copy2(src, dest_dir)
-
 
 class FileHandler(object):
     def __init__(self, logger):
@@ -1487,26 +1419,11 @@ class Worker(threading.Thread):
                 parquet_read_path = self._resolve_parquet_path(hdfs_dest)
                 df = self.spark.read.parquet(parquet_read_path)
                 self._log_reconcile_column_usage(partition, cat_cols, df.dtypes)
-                # FOR DEBUG
-                # self.logger.info("Total rows in raw parquet (count action): {}".format(df.count()))
-                # self.logger.info("Raw Parquet Schema:")
-                # df.printSchema()
+
                 agg_exprs = self.query_builder.build_agg_exprs(cat_cols)
                 
                 self.logger.info("Worker {0} executing Spark Action for {1}...".format(self.name, partition))
-                # FOR DEBUG
-                # failure_found = False
-                # for expr in agg_exprs:
-                #     try:
-                #         self.logger.info("Testing expr: {}".format(expr))
-                #         df.agg(expr).collect() 
-                #     except Exception as inner_e:
-                #         self.logger.error("FAULTY EXPRESSION FOUND: {} \nError: {}".format(expr, str(inner_e)))
-                #         failure_found = True
-                #         break
-
-                # if failure_found:
-                #     raise RuntimeError("Aborting due to bad SQL expression.")
+                
                 agg_result = df.agg(*agg_exprs).collect()
                 if not agg_result:
                     raise RuntimeError("Spark aggregation returned empty result for {0}".format(partition))
@@ -1578,21 +1495,12 @@ class Worker(threading.Thread):
 
                 # Copy both files to NAS
                 copy_success, copy_err = self._copy_file_to_nas(self.local_json_file, db, schema, out_file_name)
-                # copy_sql_success, copy_sql_err = self._copy_file_to_nas(local_query_file, db, schema, query_file_name)
-                
+               
                 # Check actual existence on NAS
                 nas_dir = os.path.join(self.config.nas_destination, db, schema)
                 nas_json_path = os.path.join(nas_dir, out_file_name)
-                # nas_sql_path = os.path.join(nas_dir, query_file_name)
                 
                 json_exists = os.path.exists(nas_json_path)
-                # sql_exists = os.path.exists(nas_sql_path)
-
-                # if copy_success and copy_sql_success and json_exists and sql_exists:
-                #     self.logger.info("Worker {0} successfully saved and copied both JSON and SQL to NAS for {1}".format(self.name, partition))
-                # else:
-                #     self.logger.error("Worker {0} failed NAS sync for {1}. JSON Err: {2} | SQL Err: {3}".format(
-                #         self.name, partition, copy_err, copy_sql_err))
                 if copy_success and json_exists:
                     self.logger.info("Worker {0} successfully saved and copied JSON to NAS for {1}".format(self.name, partition))
                     status = "SUCCESS"
@@ -1620,7 +1528,6 @@ class Worker(threading.Thread):
                     remark = "{0} | {1}".format(remark, ",".join(manual_num_err))
                 
                 self.tracker.add_result(partition, status, duration, remark)
-                #self.hive_logger.log_execution_status(self.execution_id, db, schema, base_table, partition, start_datetime, datetime.now(), duration, status.lower(), remark)
 
             except ValueError as ve:
                 remark = str(ve)
@@ -1630,11 +1537,9 @@ class Worker(threading.Thread):
                 else:
                     status = "FAILED"
                 self.tracker.add_result(partition, status, time.time() - start_t, remark)
-                #self.hive_logger.log_execution_status(self.execution_id, db, schema, base_table, partition, start_datetime, datetime.now(), time.time() - start_t, status.lower(), msg)
             except Exception as e:
                 remark = str(e)
                 status = "FAILED"
-                # self.logger.warning("Worker {0} failed on {1}: {2}".format(self.name, partition, repr(e)))
                 self.logger.warning("Worker {0} failed on {1}: {2}".format(self.name, partition, e))
                 self.tracker.add_result(partition, "FAILED", time.time() - start_t, "Error: {0}".format(remark[:50]))
                 self.hive_logger.log_execution_status(self.execution_id, db, schema, base_table, partition, start_datetime, datetime.now(), time.time() - start_t, "failed", remark[:200])
@@ -2005,7 +1910,7 @@ class ParquetQueryJob(object):
 
         # Init Handlers
         self.log_parser = LogParser(self.config.succeed_path, logger)
-        self.hdfs_h = HDFSHandler(self.spark, logger, self.config.hdfs_replication)
+        self.hdfs_h = HDFSHandler(self.spark, logger, self.config.hdfs_replication, self.config.hdfs_put_parallelism)
         self.meta_fetcher = MetadataFetcher(self.config.metadata_base_dir, logger)
         self.query_builder = SparkQueryBuilder(self.config.env_params, self.config.type_mapping, logger)
         self.hive_logger = HiveLogger(self.spark, logger)
@@ -2133,8 +2038,8 @@ class HDFSSyncJob(object):
             raise RuntimeError("CRITICAL_FAILED: Cannot create SparkSession: {0}".format(e))
 
         self.log_parser = LogParser(self.config.succeed_path, logger)
-        # Use config.hdfs_replication for upload mode so replication factor matches env settings
-        self.hdfs_h = HDFSHandler(self.spark, logger, self.config.hdfs_replication)
+        # Use config values for upload mode so replication and parallelism match env settings
+        self.hdfs_h = HDFSHandler(self.spark, logger, self.config.hdfs_replication, self.config.hdfs_put_parallelism)
         self.file_h = FileHandler(logger)
         self.status_file_locks = {}
         self.status_file_locks_lock = threading.Lock()

@@ -434,7 +434,7 @@ class ConfigManager(object):
         #    self.logger.error("Failed to execute psql subprocess: {0}".format(e))
         #    return False
         try:
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
             stdout, stderr = process.communicate()
             
             try:

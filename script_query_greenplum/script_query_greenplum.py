@@ -188,15 +188,16 @@ class LogParser(object):
         
         if latest_row:
             latest_status = latest_row.get('Run_Status', '').upper()
+            latest_hive_tbl = latest_row.get('Hive_Tbl', '').lower()
             if latest_status == 'SUCCEEDED':
                 self.logger.info("[LogParser] Found latest Export status = SUCCEEDED for {0} from Cache.".format(table))
-                return latest_status, "Found latest Export Status = SUCCEEDED"
+                return latest_status, "Found latest Export Status = SUCCEEDED", latest_hive_tbl
             else:
                 self.logger.warning("[LogParser] Latest status of table: {0} is not SUCCEEDED (status = {1})".format(table, latest_status))
-                return None, "Latest Export status is not SUCCEEDED"
+                return None, "Latest Export status is not SUCCEEDED", None
         else:
             self.logger.warning("[LogParser] Not found any Export Status of table: {0}".format(table))
-            return None, "Not found any Export Status"
+            return None, "Not found any Export Status", None
     
 def setup_logging(log_dir, log_name="app", date_folder=None, timestamp=None):
     if date_folder:
@@ -298,6 +299,9 @@ class Config(object):
                         elif key == 'thai_mapping_export_path': self.thai_mapping_export_path = value
                         elif key == 'succeed_path': self.succeed_path = value
                         elif key == 'list_datatype_conv_only_no_len': self.list_datatype_conv_only_no_len = [v.strip().lower() for v in value.split(',')]
+                        elif key == 'ctas_schema': self.ctas_schema = value
+                        elif key == 'ctas_prefix_table_name': self.ctas_prefix_table_name = value
+                        elif key == 'export_prefix_table_name': self.export_prefix_table_name = value
                         elif key in self.env_params:
                             self.env_params[key] = int(value)
                 
@@ -342,6 +346,18 @@ class Config(object):
                 log_msg = "config_master_file_path is not defined in env_config.txt"
                 self.logger.error(log_msg)
                 raise ValueError("Error: " + log_msg)
+            if self.ctas_schema is None:
+                log_msg = "ctas_schema is not defined in env_config.txt"
+                self.logger.error(log_msg)
+                raise ValueError("Error: " + log_msg)
+            if self.ctas_prefix_table_name is None:
+                log_msg = "ctas_prefix_table_name is not defined in env_config.txt"
+                self.logger.error(log_msg)
+                raise ValueError("Error: " + log_msg)
+            if self.export_prefix_table_name is None:
+                log_msg = "export_prefix_table_name is not defined in env_config.txt"
+                self.logger.error(log_msg)
+                raise ValueError("Error: " + log_msg)
             
             self.logger.info("Resolved local_temp_dir: {0}".format(self.local_temp_dir))
             self.logger.info("Resolved nas_dest_base: {0}".format(self.nas_dest_base))
@@ -383,26 +399,27 @@ class Config(object):
         if cli_tables:
             # Case 1: Use CLI Arguments
             self.logger.info("Using CLI arguments for table list.")
-            # Expect format: DB|Schema.Table,DB2|Schema.Table
+            # Expect format: DB1|Schema1.Table1|Flag1,DB2|Schema2.Table2|Flag2
             tables = cli_tables.lower().split(',')
             for t in tables:
                 try:
-                    # Parse DB|Schema.Table
-                    db_part, tbl_part = t.split('|')
+                    # Parse DB|Schema.Table|Flag
+                    db_part, tbl_part, flg_bad_dist = t.split('|')
                     sch_part, real_tbl = tbl_part.split('.')
                     
                     if db_part and sch_part and real_tbl:
                         self.execution_list.append({
                             'db': db_part.strip(),
                             'schema': sch_part.strip(),
-                            'table': real_tbl.strip()
+                            'table': real_tbl.strip(),
+                            'flg_bad_distributed': 'N' if not flg_bad_dist else flg_bad_dist.strip()
                         })
                     else:
-                        self.logger.warning("Invalid format in argument: {0}. Expected DB|Schema.Table".format(t))
+                        self.logger.warning("Invalid format in argument: {0}. Expected DB|Schema.Table|Flg[Y,N]".format(t))
                         continue
                         
                 except ValueError:
-                    self.logger.warning("Invalid format in argument: {0}. Expected DB|Schema.Table".format(t))
+                    self.logger.warning("Invalid format in argument: {0}. Expected DB|Schema.Table|Flg[Y,N]".format(t))
         else:
             # Case 2: Use List File
             self.logger.info("Using list file: {0}".format(list_file_path))
@@ -417,15 +434,16 @@ class Config(object):
                                 continue
                             
                             try:
-                                # Format: DB|Schema.Table
-                                db_part, tbl_part = line.split('|')
+                                # Format: DB|Schema.Table|Flag
+                                db_part, tbl_part, flg_bad_dist = line.split('|')
                                 sch_part, real_tbl = tbl_part.split('.')
                                 
                                 if db_part and sch_part and real_tbl:
                                     self.execution_list.append({
                                         'db': db_part.strip(),
                                         'schema': sch_part.strip(),
-                                        'table': real_tbl.strip()
+                                        'table': real_tbl.strip(),
+                                        'flg_bad_distributed': 'N' if not flg_bad_dist else flg_bad_dist.strip()
                                     })
                                 else:
                                     self.logger.warning("Skipping invalid line in list file: {0}".format(line))
@@ -441,7 +459,7 @@ class Config(object):
                 raise
 
         # distinct execution_list
-        self.execution_list = list({(d['db'], d['schema'], d['table']): d for d in self.execution_list}.values())
+        self.execution_list = list({(d['db'], d['schema'], d['table'], d['flg_bad_distributed']): d for d in self.execution_list}.values())
         
         if self.gp_db and self.thai_mapping_table and self.thai_mapping_export_path:
             self._export_thai_mapping()
@@ -492,7 +510,12 @@ class Config(object):
         self.logger.info("{0}".format(" ".join(cmd)))
         
         try:
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.Popen(
+                cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                close_fds=True
+            )
             stdout, stderr = process.communicate()
             
             try:
@@ -564,10 +587,13 @@ class QueryBuilder(object):
             s = self.env_params['cast_real_s']
             r = self.env_params['round_real']
             return "ROUND({0}(({1})::numeric({2},{3})), {4})".format(agg_func, col_expr, p, s, r)
+        # -- if datatype = 'integer' or 'smallint' then, cast to 'bigint' before aggegrate
+        elif gp_base == 'integer' or gp_base == 'smallint':
+            return "{0}({1}::bigint)".format(agg_func, col_expr)
         else:
             return "{0}({1})".format(agg_func, col_expr)
         
-    def build_json_query(self, db, schema, table, categorized_cols, insert_logic_dict):
+    def build_json_query(self, db, schema, table, categorized_cols, insert_logic_dict, ctas_schema, ctas_table):
         try:
             full_table_name = "{0}.{1}.{2}".format(db, schema, table)
             metric_fragments = []
@@ -624,15 +650,26 @@ class QueryBuilder(object):
             metrics_sql = " || ', ' || ".join(method_groups) if method_groups else "''"
             
             # Construct single JSON object string
-            sql = (
-                "SELECT '{{' || "
-                " '\"table\": \"{0}\", ' || "
-                " '\"source_type\": \"greenplum\", ' || "
-                " '\"count\": ' || COUNT(*)::text || ', ' || "
-                " '\"methods\": {{' || {1} || '}}' || "
-                " '}}' "
-                "FROM \"{2}\".\"{3}\";"
-            ).format(full_table_name, metrics_sql, schema, table)
+            if ctas_table:
+                sql = (
+                    "SELECT '{{' || "
+                    " '\"table\": \"{0}\", ' || "
+                    " '\"source_type\": \"greenplum\", ' || "
+                    " '\"count\": ' || COUNT(*)::text || ', ' || "
+                    " '\"methods\": {{' || {1} || '}}' || "
+                    " '}}' "
+                    "FROM \"{2}\".\"{3}\";"
+                ).format(full_table_name, metrics_sql, ctas_schema, ctas_table)
+            else:
+                sql = (
+                    "SELECT '{{' || "
+                    " '\"table\": \"{0}\", ' || "
+                    " '\"source_type\": \"greenplum\", ' || "
+                    " '\"count\": ' || COUNT(*)::text || ', ' || "
+                    " '\"methods\": {{' || {1} || '}}' || "
+                    " '}}' "
+                    "FROM \"{2}\".\"{3}\";"
+                ).format(full_table_name, metrics_sql, schema, table)
 
             filename = "query_{0}_{1}_{2}_{3}.sql".format(db, schema, table, self.global_ts)
             filepath = os.path.join(self.temp_dir, filename)
@@ -661,7 +698,12 @@ class ShellHandler(object):
         self.logger.info("Executing PSQL... (DB: {0}) -> Output: {1}".format(db_name or 'Default', output_path))
         self.logger.info("{0}".format(" ".join(cmd)))
         try:
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.Popen(
+                cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                close_fds=True
+            )
             stdout, stderr = process.communicate()
             
             try:
@@ -874,6 +916,8 @@ class Worker(threading.Thread):
             self.db = task['db'].strip().lower()
             self.schema = task['schema'].strip().lower()
             table = task['table'].strip().lower()
+            self.ctas_table = None
+            self.flg_bad_distributed = task['flg_bad_distributed'].strip()
             full_name = "{0}.{1}.{2}".format(self.db, self.schema, table)
             # pre-defined logging info
             self.short_name = "{0}.{1}".format(self.schema, table)
@@ -881,138 +925,173 @@ class Worker(threading.Thread):
             self.start_ts_tbl = datetime.fromtimestamp(self.start_time_tbl).strftime("%Y-%m-%d %H:%M:%S")
             self.reconcile_method = ['count']
             manual_num_err = []
-            
-            for attempt in range(1, max_retries + 1):
-                # Reset error message for each attempt
-                self.error_message = ""
-                try:
-                    self.tracker.update_worker_status(self.name, "[BUSY] {0} (Attempt {1})".format(self.short_name, attempt))
-                    self.logger.info("Worker {0} started processing table: {1} (Attempt {2})".format(self.name, full_name, attempt))
-                    start_t = time.time()
 
-                    # Step 1: Check Log
-                    log_row, log_msg = self.log_parser.get_latest_succeed_info(self.db, self.schema, table)
-                    if not log_row:
-                        raise ValueError(log_msg)
+            if self.flg_bad_distributed.upper() not in ('Y', 'N'):
+                self.status = "FAILED"
+                self.error_message = "invalid input for Flag Bad Distributed {0}".format(self.flg_bad_distributed)
+                self.logger.error("Worker {0} Failed for {1}: {2}".format(self.name, full_name, self.error_message))
+                self.tracker.add_result(full_name, self.status, self.error_message)
+            else:
+                for attempt in range(1, max_retries + 1):
+                    # Reset error message for each attempt
+                    self.error_message = ""
+                    try:
+                        self.tracker.update_worker_status(self.name, "[BUSY] {0} (Attempt {1})".format(self.short_name, attempt))
+                        self.logger.info("Worker {0} started processing table: {1} (Attempt {2})".format(self.name, full_name, attempt))
+                        start_t = time.time()
 
-                    # Step 2: Config and Metadata
-                    pre_master_info = self.config.master_data.get((self.db, self.schema, table), {'manual_num': []})
-                    thai_config = self.config.thai_dict.get((self.db, table), {})
-                    dt_file, il_file = self._get_latest_metadata(self.db, self.short_name)
-                    self.logger.info("")
-                    self.logger.info("Data type file: {0}".format(dt_file))
-                    self.logger.info("Insert Logic file: {0}".format(il_file))
-                    self.logger.info("")
-                    missing_flag = False if dt_file else True
+                        # Step 1: Check Log
+                        log_row, log_msg, log_hive_tbl = self.log_parser.get_latest_succeed_info(self.db, self.schema, table)
+                        if not log_row:
+                            raise ValueError(log_msg)
 
-                    if missing_flag:
-                        self.status = "FAILED"
-                        self.error_message = "Not found data type file"
+                        # Step 2: Config and Metadata
+                        pre_master_info = self.config.master_data.get((self.db, self.schema, table), {'manual_num': []})
+                        thai_config = self.config.thai_dict.get((self.db, table), {})
+                        dt_file, il_file = self._get_latest_metadata(self.db, self.short_name)
+                        self.logger.info("")
+                        self.logger.info("Data type file: {0}".format(dt_file))
+                        self.logger.info("Insert Logic file: {0}".format(il_file))
+                        self.logger.info("")
+                        missing_flag = False if dt_file else True
+
+                        if missing_flag:
+                            self.status = "FAILED"
+                            self.error_message = "Not found data type file"
+                            self.logger.error(self.error_message)
+                            self.tracker.add_result(full_name, self.status, self.error_message)
+                            break
+                        else:
+                            # Check issue bad distributed
+                            if self.flg_bad_distributed == 'y':
+                                self.logger.info("Table {0} is marked as Bad Distribution table".format(full_name))
+                                if log_hive_tbl:
+                                    try:
+                                        log_hive_schema_part, log_hive_table_part = log_hive_tbl.split('.')
+                                    except Exception as e:
+                                        self.status = "FAILED"
+                                        self.error_message = "Failed to get hive table name from stat csv: {0}.".format(e)
+                                        self.logger.error(self.error_message)
+                                        self.tracker.add_result(full_name, self.status, self.error_message)
+                                        break
+
+                                    if log_hive_table_part.startswith(self.config.export_prefix_table_name):
+                                        self.ctas_table = self.config.ctas_prefix_table_name + log_hive_table_part[len(self.config.export_prefix_table_name):]
+                                    else:
+                                        self.status = "FAILED"
+                                        self.error_message = "External table name does not start with {0}. Please check if this table has a CTAS table.".format(self.config.export_prefix_table_name)
+                                        self.logger.error(self.error_message)
+                                        self.tracker.add_result(full_name, self.status, self.error_message)
+                                        break
+
+                                else:
+                                    self.status = "FAILED"
+                                    self.error_message = "Not found hive table name in log stat csv of export job."
+                                    self.logger.error(self.error_message)
+                                    self.tracker.add_result(full_name, self.status, self.error_message)
+                                    break
+
+                            # Check manual_num column
+                            master_info, manual_num_err = self._check_manual_num(pre_master_info, dt_file)
+                            # Parse Logic
+                            insert_logic_dict = {}
+                            if il_file:
+                                with open(il_file, 'r') as f:
+                                    cur_col = None
+                                    for line in f.read().splitlines():
+                                        # skip Header
+                                        if not line.strip() or line == "gp_column_nm;insert_logic":
+                                            continue
+                                        
+                                        # match "column_name;logic"
+                                        m = re.match(r'^([a-zA-Z0-9_]+);(.*)', line)
+                                        if m:
+                                            cur_col = m.group(1).strip().lower()
+                                            insert_logic_dict[cur_col] = m.group(2)
+                                        elif cur_col:
+                                            insert_logic_dict[cur_col] += " " + line
+
+                                for col in insert_logic_dict:
+                                    logic = insert_logic_dict[col].replace('\\n', ' ').replace('\n', ' ')
+                                    insert_logic_dict[col] = re.sub(r'(?i)\s+AS\s+"?[a-zA-Z0-9_]+"?(?:\s*)$', '', logic).strip()
+
+                            # Categorize
+                            cat_cols = {'SUM_MIN_MAX': [], 'MIN_MAX': [], 'MD5_MIN_MAX': [], 'TYPE_MAP': {}, 'MANUAL_NUM': master_info['manual_num']}
+                            if dt_file:
+                                with open(dt_file, 'r') as f:
+                                    reader = csv.DictReader(f, delimiter='|')
+                                    for row in reader:
+                                        col_nm = row.get('gp_column_nm', '').strip().lower()
+                                        gp_dt = row.get('gp_datatype', '').strip()
+
+                                        if col_nm and gp_dt:
+                                            cat_cols['TYPE_MAP'][col_nm] = gp_dt
+                                            gp_base = gp_dt.split('(')[0].strip().lower()
+                                            t_flag = thai_config.get(col_nm.lower())
+
+                                            if t_flag == 'Y':
+                                                gp_base = 'thai_col_flag_y'
+                                            elif t_flag == 'N':
+                                                gp_base = 'thai_col_flag_n'
+
+                                            sum_map = [x.strip().lower() for x in self.config.type_mapping.get("SUM_MIN_MAX", [])]
+                                            min_map = [x.strip().lower() for x in self.config.type_mapping.get("MIN_MAX", [])]
+                                            md5_map = [x.strip().lower() for x in self.config.type_mapping.get("MD5_MIN_MAX", [])]
+
+                                            if gp_base in sum_map:
+                                                cat_cols['SUM_MIN_MAX'].append(col_nm)
+                                                self.reconcile_method.append('number_sum_min_max')
+                                            elif gp_base in min_map:
+                                                cat_cols['MIN_MAX'].append(col_nm)
+                                                self.reconcile_method.append('dttm_min_max')
+                                            elif gp_base in md5_map:
+                                                cat_cols['MD5_MIN_MAX'].append(col_nm)
+                                                self.reconcile_method.append('md5_min_max')
+                                            elif gp_base in self.config.list_datatype_conv_only_no_len and '(' not in gp_dt:
+                                                cat_cols['MD5_MIN_MAX'].append(col_nm)
+                                                self.reconcile_method.append('md5_min_max')
+
+                            # Call JSON builder and save as .json file
+                            sql_file = self.builder.build_json_query(self.db, self.schema, table, cat_cols, insert_logic_dict, self.config.ctas_schema, self.ctas_table)
+                            output_filename = "gp_{0}_{1}_{2}_{3}.json".format(self.db, self.schema, table, self.global_ts)
+                            local_path = os.path.join(self.config.local_temp_dir, output_filename)
+                            json_output_dir = os.path.join(self.config.nas_dest_base, self.db, self.schema)
+                            self.json_output_path_file = os.path.join(json_output_dir, output_filename)
+
+                            self.shell.run_psql(sql_file, local_path, self.db)
+                            self.file_h.copy_to_nas(local_path, json_output_dir)
+
+                            if manual_num_err:
+                                self.status = "FAILED"
+                                self.error_message = " , ".join(manual_num_err)
+                            else:
+                                self.status = "SUCCEEDED"
+                                self.error_message = "-"
+
+                            self.tracker.add_result(full_name, self.status, self.error_message)
+                            self.tracker.log_step(full_name, time.time() - start_t)
+
+                            break
+
+                    except ValueError as ve: 
+                        self.status = "SKIPPED"
+                        self.error_message = "{0}".format(ve).replace("\n", " ")
                         self.logger.error(self.error_message)
                         self.tracker.add_result(full_name, self.status, self.error_message)
                         break
-                    else:
-                        # Check manual_num column
-                        master_info, manual_num_err = self._check_manual_num(pre_master_info, dt_file)
-                        # Parse Logic
-                        insert_logic_dict = {}
-                        if il_file:
-                            with open(il_file, 'r') as f:
-                                cur_col = None
-                                for line in f.read().splitlines():
-                                    # skip Header
-                                    if not line.strip() or line == "gp_column_nm;insert_logic":
-                                        continue
-                                    
-                                    # match "column_name;logic"
-                                    m = re.match(r'^([a-zA-Z0-9_]+);(.*)', line)
-                                    if m:
-                                        cur_col = m.group(1).strip().lower()
-                                        insert_logic_dict[cur_col] = m.group(2)
-                                    elif cur_col:
-                                        insert_logic_dict[cur_col] += " " + line
-                            
-                            for col in insert_logic_dict:
-                                logic = insert_logic_dict[col].replace('\\n', ' ').replace('\n', ' ')
-                                insert_logic_dict[col] = re.sub(r'(?i)\s+AS\s+"?[a-zA-Z0-9_]+"?(?:\s*)$', '', logic).strip()
-                        
-                        # Categorize
-                        cat_cols = {'SUM_MIN_MAX': [], 'MIN_MAX': [], 'MD5_MIN_MAX': [], 'TYPE_MAP': {}, 'MANUAL_NUM': master_info['manual_num']}
-                        if dt_file:
-                            with open(dt_file, 'r') as f:
-                                reader = csv.DictReader(f, delimiter='|')
-                                for row in reader:
-                                    col_nm = row.get('gp_column_nm', '').strip().lower()
-                                    gp_dt = row.get('gp_datatype', '').strip()
-                                    
-                                    if col_nm and gp_dt:
-                                        cat_cols['TYPE_MAP'][col_nm] = gp_dt
-                                        gp_base = gp_dt.split('(')[0].strip().lower()
-                                        t_flag = thai_config.get(col_nm.lower())
 
-                                        if t_flag == 'Y':
-                                            gp_base = 'thai_col_flag_y'
-                                        elif t_flag == 'N':
-                                            gp_base = 'thai_col_flag_n'
-                                            
-                                        sum_map = [x.strip().lower() for x in self.config.type_mapping.get("SUM_MIN_MAX", [])]
-                                        min_map = [x.strip().lower() for x in self.config.type_mapping.get("MIN_MAX", [])]
-                                        md5_map = [x.strip().lower() for x in self.config.type_mapping.get("MD5_MIN_MAX", [])]
-
-                                        if gp_base in sum_map:
-                                            cat_cols['SUM_MIN_MAX'].append(col_nm)
-                                            self.reconcile_method.append('number_sum_min_max')
-                                        elif gp_base in min_map:
-                                            cat_cols['MIN_MAX'].append(col_nm)
-                                            self.reconcile_method.append('dttm_min_max')
-                                        elif gp_base in md5_map:
-                                            cat_cols['MD5_MIN_MAX'].append(col_nm)
-                                            self.reconcile_method.append('md5_min_max')
-                                        elif gp_base in self.config.list_datatype_conv_only_no_len and '(' not in gp_dt:
-                                            cat_cols['MD5_MIN_MAX'].append(col_nm)
-                                            self.reconcile_method.append('md5_min_max')
-
-                        # Call JSON builder and save as .json file
-                        sql_file = self.builder.build_json_query(self.db, self.schema, table, cat_cols, insert_logic_dict)
-                        output_filename = "gp_{0}_{1}_{2}_{3}.json".format(self.db, self.schema, table, self.global_ts)
-                        local_path = os.path.join(self.config.local_temp_dir, output_filename)
-                        json_output_dir = os.path.join(self.config.nas_dest_base, self.db, self.schema)
-                        self.json_output_path_file = os.path.join(json_output_dir, output_filename)
-                        
-                        self.shell.run_psql(sql_file, local_path, self.db)
-                        self.file_h.copy_to_nas(local_path, json_output_dir)
-
+                    except Exception as outer_e:
+                        self.status = "FAILED"
                         if manual_num_err:
-                            self.status = "FAILED"
                             self.error_message = " , ".join(manual_num_err)
+                        self.error_message = "{0} , {1}".format(self.error_message, outer_e).replace("\n", " ")
+                        if attempt < max_retries:
+                            self.logger.warning("Worker {0} Error on attempt {1} for {2}: {3}. Retrying in 3 seconds...".format(self.name, attempt, full_name, self.error_message))
+                            time.sleep(3) # sleep before next attempt
                         else:
-                            self.status = "SUCCEEDED"
-                            self.error_message = "-"
-                            
-                        self.tracker.add_result(full_name, self.status, self.error_message)
-                        self.tracker.log_step(full_name, time.time() - start_t)
+                            self.logger.error("Worker {0} Failed after {1} attempts for {2}: {3}".format(self.name, max_retries, full_name, self.error_message))
+                            self.tracker.add_result(full_name, self.status, self.error_message)
 
-                        break
-
-                except ValueError as ve: 
-                    self.status = "SKIPPED"
-                    self.error_message = "{0}".format(ve).replace("\n", " ")
-                    self.logger.error(self.error_message)
-                    self.tracker.add_result(full_name, self.status, self.error_message)
-                    break
-                    
-                except Exception as outer_e:
-                    self.status = "FAILED"
-                    if manual_num_err:
-                        self.error_message = " , ".join(manual_num_err)
-                    self.error_message = "{0} , {1}".format(self.error_message, outer_e).replace("\n", " ")
-                    if attempt < max_retries:
-                        self.logger.warning("Worker {0} Error on attempt {1} for {2}: {3}. Retrying in 3 seconds...".format(self.name, attempt, full_name, self.error_message))
-                        time.sleep(3) # sleep before next attempt
-                    else:
-                        self.logger.error("Worker {0} Failed after {1} attempts for {2}: {3}".format(self.name, max_retries, full_name, self.error_message))
-                        self.tracker.add_result(full_name, self.status, self.error_message)
-                        
             # After finishing processing, write one CSV line:
             try:
                 try:
@@ -1171,7 +1250,7 @@ if __name__ == "__main__":
     # handle table and list
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--list', default='list_table.txt', help='Name of list of tables file')
-    group.add_argument('--table_name', help='Optional: Specific table to run (DB|Schema.Table)')
+    group.add_argument('--table_name', help='Optional: Specific table to run (DB|Schema.Table|FlagBadDistributed[Y,N])')
 
     args = parser.parse_args()
 

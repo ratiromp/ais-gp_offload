@@ -1435,8 +1435,10 @@ class Worker(threading.Thread):
                 if sync_status != "SUCCEEDED":
                     raise ValueError("FAILED: Latest status of HDFS Sync is not SUCCEEDED.")
                 hdfs_dest = hdfs_from_stat
-                if not self._hdfs_has_parquet(hdfs_dest):
-                    raise ValueError("SKIPPED: No .parquet files at HDFS path: {0}".format(hdfs_dest))
+                # True = at least one .parquet file was found anywhere under the HDFS path
+                parquet_files_exist = self._hdfs_has_parquet(hdfs_dest)
+                if parquet_files_exist == False:
+                    raise ValueError("FAILED: No .parquet files at HDFS path: {0}".format(hdfs_dest))
                 self.logger.info("[{0}] HDFS pre-check passed: {1}".format(self.name, hdfs_dest))
 
                 # Step 3: Fetch Metadata & Categorize

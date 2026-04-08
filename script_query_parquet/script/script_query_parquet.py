@@ -2216,7 +2216,10 @@ if __name__ == "__main__":
 
     #args.list = resolve_config_path(args.list, main_path)
     if args.list is not None:
-        args.list = resolve_config_path(args.list, main_path)
+        if not args.list or os.path.isabs(args.list):
+            pass
+        else:
+            args.list = os.path.join(main_path, 'list_table', args.list)
 
     run_datetime = datetime.now()
     global_date_folder = run_datetime.strftime("%Y%m%d")

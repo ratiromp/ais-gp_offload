@@ -1,3 +1,13 @@
 hdfs_prefix=/data/gpoffload/data_recon
 retention_hours=24
 kinit=kinit -kt /home/dlcdrauth/dlcdrauth.keytab dlcdrauth@CORP.AIS900.ORG
+beeline_url=jdbc:hive2://phdnndl803.datalake.intra.ais:10000/default;ssl=true;sslTrustStore=/opt/cloudera/security/pki/truststore.jks;sslTrustPassword=P@ssw0rd;
+beeline_user=dlcdrauth
+beeline_pwd=D@A@S@17#October#2025#IIAS#ITO
+check_hdfs_path_concurrency=4
+total_sh_files=4
+execute_sh_concurrency=4
+conda_activate_cmd=source /opt/anaconda37/bin/activate /home/dlcdrauth/.conda/envs/venv_gpoffload
+parquet_writer_path=/data/AIS-EDW/gpoffload/script_compare_result/script/parquet_writer.py
+pending_purge_vw_name=ais_gpoffload_reconcile.vw_pending_housekeeping
+hive_log_table=/data/gpoffload/reconcile/ais_gpoffload_reconcile/log_housekeeping

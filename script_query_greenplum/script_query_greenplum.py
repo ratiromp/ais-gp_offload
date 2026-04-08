@@ -688,15 +688,17 @@ class ShellHandler(object):
     def __init__(self, logger):
         self.logger = logger
 
-    def run_psql(self, sql_file, output_path, db_name=None):
+    def run_psql(self, sql_file, output_path, db_name=None, worker_name="Unknown", table_name="Unknown"):
         cmd = ['psql', '-v', 'ON_ERROR_STOP=1', '-q', '-t', '-A']
 
         if db_name:
             cmd.extend(['-d', db_name])
         cmd.extend(['-f', sql_file, '-o', output_path])
 
-        self.logger.info("Executing PSQL... (DB: {0}) -> Output: {1}".format(db_name or 'Default', output_path))
-        self.logger.info("{0}".format(" ".join(cmd)))
+        log_prefix = "[{0}] [{1}]".format(worker_name, table_name)
+
+        self.logger.info("{0} Executing PSQL... (DB: {1}) -> Output: {2}".format(log_prefix, db_name or 'Default', output_path))
+        self.logger.info("{0} {1}".format(log_prefix, " ".join(cmd)))
         try:
             process = subprocess.Popen(
                 cmd, 
@@ -704,6 +706,35 @@ class ShellHandler(object):
                 stderr=subprocess.PIPE,
                 close_fds=True
             )
+
+            child_pid = process.pid
+            stdout_fd = process.stdout.fileno()
+            stderr_fd = process.stderr.fileno()
+            stdout_inode = os.fstat(stdout_fd).st_ino
+            stderr_inode = os.fstat(stderr_fd).st_ino
+
+            self.logger.info("{0} [Process Tracker] Child PID: {1}".format(log_prefix, child_pid))
+            self.logger.info("{0} [PIPE Tracker]    STDOUT -> Read-End FD: {1:<3} | Child Write-End FD: 1 | Inode: {2}".format(log_prefix, stdout_fd, stdout_inode))
+            self.logger.info("{0} [PIPE Tracker]    STDERR -> Read-End FD: {1:<3} | Child Write-End FD: 2 | Inode: {2}".format(log_prefix, stderr_fd, stderr_inode))
+
+            fd_dir = "/proc/{0}/fd".format(child_pid)
+            try:
+                fd_list = []
+                # List all fd numbers and sort them numerically
+                for fd_name in sorted(os.listdir(fd_dir), key=lambda x: int(x) if x.isdigit() else x):
+                    fd_path = os.path.join(fd_dir, fd_name)
+                    try:
+                        target = os.readlink(fd_path)
+                        fd_list.append("{0}->{1}".format(fd_name, target))
+                    except OSError:
+                        pass # Ignore if the FD was closed rapidly before we could read the symlink
+                
+                fd_details = ", ".join(fd_list)
+                self.logger.info("{0} [FD Detail]        Child {1} holds FDs: {2}".format(log_prefix, child_pid, fd_details))
+            except OSError as e:
+                # Handle cases where the process finished and exited before Python could read /proc
+                self.logger.info("{0} [FD Detail]        Could not read {1} (Process may have finished instantly): {2}".format(log_prefix, fd_dir, e))
+
             stdout, stderr = process.communicate()
             
             try:
@@ -1058,7 +1089,7 @@ class Worker(threading.Thread):
                             json_output_dir = os.path.join(self.config.nas_dest_base, self.db, self.schema)
                             self.json_output_path_file = os.path.join(json_output_dir, output_filename)
 
-                            self.shell.run_psql(sql_file, local_path, self.db)
+                            self.shell.run_psql(sql_file, local_path, self.db, worker_name=self.name, table_name=self.short_name)
                             self.file_h.copy_to_nas(local_path, json_output_dir)
 
                             if manual_num_err:
@@ -1287,7 +1318,9 @@ if __name__ == "__main__":
         job.run()
     except Exception as e:
         logger.critical("Job aborted due to critical error: {0}".format(e))
-        print("")
+        print("\n!!! ==================================================================== !!!")
+        print("!!! CRITICAL ERROR ABORT: {0}".format(e))
+        print("!!! ==================================================================== !!!\n")
         print("End of Script.")
         print("exit 1")
         sys.exit(1)

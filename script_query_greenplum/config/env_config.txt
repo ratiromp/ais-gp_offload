@@ -9,6 +9,10 @@ gp_db=prodgp
 thai_mapping_table=gpoffload.gp_list_th_col
 thai_mapping_export_path=/data/AIS-EDW/gpoffload/script_reconcile_query_greenplum/temp
 list_datatype_conv_only_no_len=char,character
+# --- Bad Distributed Config ---
+ctas_schema=gpoffload
+ctas_prefix_table_name=c
+export_prefix_table_name=p
 # --- Number Solution Default Config ---
 default_numeric_p=38
 default_numeric_s=10

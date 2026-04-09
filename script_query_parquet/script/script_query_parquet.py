@@ -67,7 +67,7 @@ class ProcessTracker(object):
         
     def print_summary(self, log_path, output_path):
         self.logger.info("="*100)
-        self.logger.info("PARQUET JSON QUERY SUMMARY")
+        self.logger.info("RECONCILE PARQUET SUMMARY REPORT")
         self.logger.info("="*100)
 
         success_count = 0

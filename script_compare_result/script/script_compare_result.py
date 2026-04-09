@@ -178,6 +178,7 @@ class ConfigManager(object):
         self.execution_list = self._build_queue(args.list, args.table_name)
 
     def _load_env_config(self, env_path):
+        self.hdfs_replication = 1
         try:
             with open(env_path, 'r') as f:
                 for line in f:
@@ -194,6 +195,7 @@ class ConfigManager(object):
                         elif key == 'kinit': self.kinit_cmd = val
                         elif key == 'hive_status_table': self.hive_status_table = val
                         elif key == 'hive_result_table': self.hive_result_table = val
+                        elif key == 'hdfs_replication': self.hdfs_replication = int(val)
         except Exception as e:
             self.logger.critical("Cannot read env config: {0}".format(e))
             err_msg = "Cannot read env config file: {0} | Error: {1}".format(env_path, e)
@@ -296,6 +298,7 @@ class ConfigManager(object):
         self.logger.info("PQ Log Path          : {0}".format(self.succeed_log_pq_path))
         self.logger.info("Hive Status Table    : {0}".format(self.hive_status_table))
         self.logger.info("Hive Result Table    : {0}".format(self.hive_result_table))
+        self.logger.info("HDFS Replication     : {0}".format(self.hdfs_replication))
         self.logger.info("Execution ID         : {0}".format(self.execution_id))
         self.logger.info("Log File Path        : {0}".format(self.log_path))
         self.logger.info("------------------------------")
@@ -328,7 +331,7 @@ class SucceededLogValidator(object):
                     with open(log_file, 'r') as f:
                         fields = [
                             "greenplum_tbl", "start_timestamp", "end_timestamp", "duration", 
-                            "reconcile_method", "run_status", "error_message", "json_output_path", "remark"
+                            "reconcile_method", "run_status", "error_message", "json_output_path", "hdfs_path", "remark"
                         ]
                         reader = csv.DictReader(f, fieldnames=fields)
                         for row in reader:
@@ -340,8 +343,12 @@ class SucceededLogValidator(object):
                                 if not current_ts or new_ts > current_ts:
                                     row['run_status'] = row.get('run_status', '').strip()
                                     row['json_output_path'] = row.get('json_output_path', '').strip()
+                                    
+                                    row['hdfs_path'] = row.get('hdfs_path', '').strip()
                                     row['source_file_path'] = log_file
                                     self.cache[source][cache_key][tbl] = row
+                                    if row['hdfs_path']:
+                                        self.logger.info("LogValidator [{0}]: Extracted hdfs_path '{1}' for '{2}'".format(source, row['hdfs_path'], tbl))
                 except Exception as e:
                     self.logger.warning("Error reading log file {0}: {1}".format(log_file, e))
                     continue
@@ -365,6 +372,7 @@ class SucceededLogValidator(object):
 
         gp_path, pq_path = None, None
         gp_err, pq_err = "", ""
+        pq_hdfs_path = None
 
         if mode in ['compare', 'load_gp', 'load_both']:
             row = find_row_in_cache('gp')
@@ -381,16 +389,24 @@ class SucceededLogValidator(object):
         if mode in ['compare', 'load_pq', 'load_both']:
             row = find_row_in_cache('pq')
             if row:
-                self.logger.info("LogValidator [PQ]: Latest record for '{0}' has status '{1}' at '{2}' [Source: {3}]".format(
-                    partition, row.get('run_status'), row.get('end_timestamp'), row.get('source_file_path')))
-                if row.get('run_status') == 'SUCCEEDED':
-                    pq_path = row.get('json_output_path', '').strip()
+                self.logger.info("LogValidator [PQ]: Latest record for '{0}' at '{1}' is method '{2}'".format(
+                    partition, row.get('end_timestamp'), row.get('reconcile_method')))
+                
+                latest_method = row.get('reconcile_method', '')
+                latest_status = row.get('run_status', '')
+
+                if latest_method == 'hdfs_sync':
+                    pq_err = "Latest record is hdfs_sync"
+                elif latest_status != 'SUCCEEDED':
+                    pq_err = "Latest query parquet status is {0}".format(latest_status)
                 else:
-                    pq_err = "Latest query parquet status is {0}".format(row.get('run_status'))
+                    pq_path = row.get('json_output_path', '').strip()
+                    pq_hdfs_path = row.get('hdfs_path', '').strip()
+                    self.logger.info("LogValidator [PQ]: Identified HDFS_PATH '{0}' for '{1}'".format(pq_hdfs_path, partition))
             else:
                 pq_err = "Table not found in parquet log"
 
-        return gp_path, pq_path, gp_err, pq_err
+        return gp_path, pq_path, pq_hdfs_path, gp_err, pq_err
     
 class JsonHandler(object):
     def __init__(self, replace_from, replace_to, logger):
@@ -822,9 +838,9 @@ class Worker(threading.Thread):
                 
                 # 1. Check Source Logs
                 self._log('INFO', "Step 1: Validating Logs".format(self.name))
-                gp_p, pq_p, gp_err, pq_err = self.log_validator.get_json_paths(db, schema, partition, self.config.mode)
+                gp_p, pq_p, pq_hdfs_p, gp_err, pq_err = self.log_validator.get_json_paths(db, schema, partition, self.config.mode)
 
-                self._log('INFO', "Paths Retrieved -> GP_PATH: {0}, PQ_PATH: {1}".format(gp_p, pq_p))
+                self._log('INFO', "Paths Retrieved -> GP_PATH: {0}, PQ_PATH: {1}, HDFS_PATH: {2}".format(gp_p, pq_p, pq_hdfs_p))
                 self._log('INFO', "Errors Retrieved -> GP_ERR: '{0}', PQ_ERR: '{1}'".format(gp_err, pq_err))
 
                 if self.config.replace_path_from and self.config.replace_path_to:
@@ -851,6 +867,26 @@ class Worker(threading.Thread):
                         self._log('INFO', "Step 3: Executing Logic (Mode: {0})".format(self.config.mode))
                         if self.config.mode == 'compare':
                             raw_res = self.reconcile_engine.compare(gp_data, pq_data)
+                            
+                            # Logic to handle empty hdfs_path when PASSED
+                            if raw_res.get('status') == 'PASSED':
+                                if pq_hdfs_p:
+                                    rep_num = getattr(self.config, 'hdfs_replication', 1)
+                                    # Command structured with '&' for Non-blocking background execution
+                                    cmd_setrep = "hdfs dfs -setrep -R {0} {1} &".format(rep_num, pq_hdfs_p)
+                                    self._log('INFO', "Triggering HDFS setrep: {0} for path: {1}".format(cmd_setrep, pq_hdfs_p))
+                                    
+                                    try:
+                                        subprocess.Popen(cmd_setrep, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+                                        raw_res['remark'] = "{0} | HDFS Setrep: Triggered".format(raw_res['remark'])
+                                    except Exception as e:
+                                        self._log('WARNING', "Failed to trigger HDFS setrep for {0}: {1}".format(pq_hdfs_p, e))
+                                        raw_res['remark'] = "{0} | HDFS Setrep Failed: {1}".format(raw_res['remark'], e)
+                                else:
+                                    warn_msg = "Condition for setrep met (PASSED), but HDFS_PATH from CSV is EMPTY/NULL. Skipping setrep."
+                                    self._log('WARNING', warn_msg)
+                                    raw_res['remark'] = "{0} | HDFS Setrep: Skipped (Empty Path)".format(raw_res['remark'])
+                                    
                         elif self.config.mode in ['load_gp', 'load_pq', 'load_both']:
                             raw_res = self._build_load_mock(gp_data, pq_data)
 

@@ -16,10 +16,10 @@ export_prefix_table_name=p
 # --- Number Solution Default Config ---
 default_numeric_p=38
 default_numeric_s=10
-cast_real_p=24
-cast_real_s=6
+cast_real_p=38
+cast_real_s=5
 cast_double_p=38
 cast_double_s=15
-round_numeric=10
+round_numeric=5
 round_real=5
-round_double=14
+round_double=5

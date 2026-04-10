@@ -1089,10 +1089,11 @@ class FileHandler(object):
 # ==============================================================================
 
 class Worker(threading.Thread):
-    def __init__(self, thread_id, job_queue, config, log_parser, hdfs_h, meta_fetcher, query_builder, hive_logger, spark, tracker, logger, execution_id, global_ts, out_path, abort_event, run_id, status_file_filenm, status_file_locks, status_file_locks_lock, file_h):
+    def __init__(self, thread_id, job_queue, config, log_parser, hdfs_h, meta_fetcher, query_builder, hive_logger, spark, tracker, logger, execution_id, global_ts, out_path, abort_event, run_id, status_file_filenm, status_file_locks, status_file_locks_lock, file_h, log_dir, log_prefix):
         threading.Thread.__init__(self)
         self.thread_id = thread_id
-        self.name = "Worker-{0:02d}".format(thread_id)
+        self.base_name = "Worker-{0:02d}".format(thread_id)
+        self.name = self.base_name
         self.queue = job_queue
         self.config = config
         self.log_parser = log_parser
@@ -1123,6 +1124,25 @@ class Worker(threading.Thread):
         self.reconcile_method = []
         self.status = ""
         self.error_message = ""
+
+        # One fixed log file per worker, reused across all tables it processes.
+        # e.g. pq_query_worker_01_20260409_143022_a1b2c3d4.log
+        worker_log_file = os.path.join(log_dir, "{0}_worker_{1:02d}_{2}_{3}.log".format(
+            log_prefix, thread_id, global_ts, run_id[:8]))
+        self.worker_log_file = worker_log_file
+        self.worker_logger = logging.getLogger("{0}.Worker.{1:02d}.{2}".format(
+            log_prefix, thread_id, run_id[:8]))
+        self.worker_logger.setLevel(logging.INFO)
+        self.worker_logger.handlers = []
+        self.worker_logger.propagate = False
+        _wfmt = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+        try:
+            _wfh = logging.FileHandler(worker_log_file)
+            _wfh.setFormatter(_wfmt)
+            self.worker_logger.addHandler(_wfh)
+        except IOError:
+            self.worker_logger = logger  # fall back to main logger if log dir not writable
+
     def _copy_file_to_nas(self, local_file_path, db, schema, target_file_name):
         nas_dir = os.path.join(self.config.nas_destination, db, schema)
         nas_file_path = os.path.join(nas_dir, target_file_name)
@@ -1146,7 +1166,7 @@ class Worker(threading.Thread):
         # 1. Define directory path
         # temp status directory: /output/<date>/stat_csv/<db>/<schema>
         status_dir = os.path.join(self.config.local_temp_dir, 'stat_csv', self.db, self.schema)
-        self.logger.info("[{0}] Logging status to directory: {1}".format(self.name, status_dir))
+        self.worker_logger.info("[{0}] Logging status to directory: {1}".format(self.name, status_dir))
         #self.status = status
 
         statused = "SUCCEEDED" if status.upper() == "SUCCESS" else status
@@ -1164,12 +1184,12 @@ class Worker(threading.Thread):
                 # errno.EEXIST is Error code 17 (File exists)
                 # If the directory was created by another thread just now, ignore the error
                 if e.errno != errno.EEXIST:
-                    self.logger.critical("Cannot create directory {0}. Error: {1}".format(status_dir, e))
+                    self.worker_logger.critical("Cannot create directory {0}. Error: {1}".format(status_dir, e))
                     return
             except Exception as e:
-                self.logger.error("Unexpected error creating directory: {0}".format(e))
+                self.worker_logger.error("Unexpected error creating directory: {0}".format(e))
                 return
-        self.logger.info("[{0}] Directory created successfully: {1}".format(self.name, status_dir))
+        self.worker_logger.info("[{0}] Directory created successfully: {1}".format(self.name, status_dir))
 
         status_file_full_path = os.path.join(status_dir, self.status_file_filenm)
 
@@ -1177,7 +1197,7 @@ class Worker(threading.Thread):
         # Acquire or create a per-file lock (shared across all workers) to prevent race conditions
         with self.status_file_locks_lock:
             lock = self.status_file_locks.setdefault(status_file_full_path, threading.Lock())
-        self.logger.info("[{0}] Acquired lock for file: {1}".format(self.name, status_file_full_path))
+        self.worker_logger.info("[{0}] Acquired lock for file: {1}".format(self.name, status_file_full_path))
 
         # 4. Attribute retrieval with getattr
         short_name = getattr(self, "short_name", "")
@@ -1186,7 +1206,7 @@ class Worker(threading.Thread):
         #error_message = getattr(self, "error_message", "").replace('\n', ' ')
         #json_output_path = getattr(self, "local_json_file", "")
         reconcile_method = getattr(self, "reconcile_method", [])
-        self.logger.info("[{0}] Retrieved attributes for logging. Short Name: {1}, Start TS: {2}, Status: {3}".format(
+        self.worker_logger.info("[{0}] Retrieved attributes for logging. Short Name: {1}, Start TS: {2}, Status: {3}".format(
             self.name, short_name, start_ts, statused
         ))
 
@@ -1203,7 +1223,7 @@ class Worker(threading.Thread):
         minutes, seconds = divmod(rem, 60)
         duration_str = "{:02d}:{:02d}:{:02d}".format(hours, minutes, seconds)
         end_ts = datetime.fromtimestamp(curr_time).strftime("%Y-%m-%d %H:%M:%S")
-        self.logger.info("[{0}] Calculated duration: {1}".format(self.name, duration_str))
+        self.worker_logger.info("[{0}] Calculated duration: {1}".format(self.name, duration_str))
 
 
         # 6. Reconcile method formatting
@@ -1224,7 +1244,7 @@ class Worker(threading.Thread):
 
         row = [s.encode('utf-8') if isinstance(s, unicode) else str(s) for s in row]
 
-        self.logger.info("Prepared log row for {0}: {1}".format(self.name, row))
+        self.worker_logger.info("Prepared log row for {0}: {1}".format(self.name, row))
 
         # 8. Thread-safe file writing (Using binary mode 'ab' for Python 2.7)
         with lock:
@@ -1233,10 +1253,10 @@ class Worker(threading.Thread):
                     writer = csv.writer(f, quoting=csv.QUOTE_ALL)
                     writer.writerow(row)
             except Exception as e:
-                self.logger.critical("Error writing to CSV: {0}".format(e))
+                self.worker_logger.critical("Error writing to CSV: {0}".format(e))
 
     def _check_manual_num(self, master_info, type_map):
-        self.logger.info("DEBUG: master_info = {0}".format(master_info))
+        self.worker_logger.info("DEBUG: master_info = {0}".format(master_info))
         new_master_info = {'manual_num': []}
         manual_num_err = []
         
@@ -1245,7 +1265,7 @@ class Worker(threading.Thread):
             datatype = type_map.get(lookup_col)
             if datatype is None:
                 remark = "Column: {0} is not found in data type file".format(col)
-                self.logger.error("[{0}] {1}".format(self.name, remark))
+                self.worker_logger.error("[{0}] {1}".format(self.name, remark))
                 manual_num_err.append(remark)
                 continue
             
@@ -1254,10 +1274,10 @@ class Worker(threading.Thread):
                 new_master_info['manual_num'].append(col)
             else:
                 remark = "Column: {0} is NOT bigint or integer (data type = {1})".format(col, datatype)
-                self.logger.error("[{0}] {1}".format(self.name, remark))
+                self.worker_logger.error("[{0}] {1}".format(self.name, remark))
                 manual_num_err.append(remark)
 
-        self.logger.info("DEBUG: new_master_info = {0}".format(new_master_info))
+        self.worker_logger.info("DEBUG: new_master_info = {0}".format(new_master_info))
         return new_master_info, manual_num_err
 
     def _summarize_columns_for_log(self, columns, type_map=None, max_items=40):
@@ -1304,7 +1324,7 @@ class Worker(threading.Thread):
         unused_in_reconcile = sorted([c for c in parquet_col_set if c not in used_cols])
         missing_in_parquet = sorted([c for c in used_cols if c not in parquet_col_set])
 
-        self.logger.info(
+        self.worker_logger.info(
             "[{0}] Reconcile used columns for {1} ({2}): {3}".format(
                 self.name,
                 partition,
@@ -1312,7 +1332,7 @@ class Worker(threading.Thread):
                 self._summarize_columns_for_log(used_in_reconcile, display_type_map)
             )
         )
-        self.logger.info(
+        self.worker_logger.info(
             "[{0}] Reconcile unused columns for {1} ({2}): {3}".format(
                 self.name,
                 partition,
@@ -1322,7 +1342,7 @@ class Worker(threading.Thread):
         )
 
         if missing_in_parquet:
-            self.logger.warning(
+            self.worker_logger.warning(
                 "[{0}] Reconcile configured columns not found in parquet for {1} ({2}): {3}".format(
                     self.name,
                     partition,
@@ -1351,16 +1371,16 @@ class Worker(threading.Thread):
                 elif status.isDirectory():
                     has_subdirs = True
             if has_parquet_direct:
-                self.logger.info("[{0}] Parquet files found directly in: {1}".format(self.name, hdfs_dest))
+                self.worker_logger.info("[{0}] Parquet files found directly in: {1}".format(self.name, hdfs_dest))
                 return hdfs_dest
             elif has_subdirs:
                 resolved = hdfs_dest + "/*/*.parquet"
-                self.logger.info("[{0}] Parquet files in sub-folders, using pattern: {1}".format(self.name, resolved))
+                self.worker_logger.info("[{0}] Parquet files in sub-folders, using pattern: {1}".format(self.name, resolved))
                 return resolved
             else:
                 return hdfs_dest
         except Exception as e:
-            self.logger.warning("[{0}] _resolve_parquet_path failed for {1}: {2}. Using original path.".format(
+            self.worker_logger.warning("[{0}] _resolve_parquet_path failed for {1}: {2}. Using original path.".format(
                 self.name, hdfs_dest, e))
             return hdfs_dest  # safe fallback
 
@@ -1385,7 +1405,7 @@ class Worker(threading.Thread):
                                 and 'hdfs_sync' in row[4].strip()):
                             all_rows.append(row)
             except Exception as e:
-                self.logger.warning("[{0}] _read_hdfs_sync_status: error reading {1}: {2}".format(
+                self.worker_logger.warning("[{0}] _read_hdfs_sync_status: error reading {1}: {2}".format(
                     self.name, fpath, e))
         if not all_rows:
             return ("", "")
@@ -1421,7 +1441,7 @@ class Worker(threading.Thread):
             _walk(dir_obj)
             return found[0]
         except Exception as e:
-            self.logger.warning("[{0}] _hdfs_has_parquet error for {1}: {2}".format(
+            self.worker_logger.warning("[{0}] _hdfs_has_parquet error for {1}: {2}".format(
                 self.name, hdfs_path, e))
             return False
 
@@ -1433,12 +1453,14 @@ class Worker(threading.Thread):
             try:
                 task = self.queue.get(block=True, timeout=2)
             except Queue.Empty:
-                self.tracker.update_worker_status(self.name, "[IDLE] Finished")
+                self.tracker.update_worker_status(self.base_name, "[IDLE] Finished")
                 break
 
             db = task['db']
             schema = task['schema']
             partition = task['partition']
+            # Update name to include current table for clearer log line prefixes
+            self.name = "{0}-{1}".format(self.base_name, partition)
             start_datetime = datetime.now()
             start_t = time.time()
 
@@ -1462,8 +1484,8 @@ class Worker(threading.Thread):
             base_table = partition.split('_1_prt_')[0] if '_1_prt_' in partition else partition
 
             try:
-                self.tracker.update_worker_status(self.name, "[BUSY] {0}".format(partition))                
-                
+                self.tracker.update_worker_status(self.base_name, "[BUSY] {0}".format(partition))
+
                 # Step 1: Check Succeed Log
                 log_row, log_msg = self.log_parser.get_latest_succeed_info(db, schema, partition)
                 if not log_row:
@@ -1480,7 +1502,7 @@ class Worker(threading.Thread):
                 parquet_files_exist = self._hdfs_has_parquet(hdfs_dest)
                 if parquet_files_exist == False:
                     raise ValueError("FAILED: No .parquet files at HDFS path: {0}".format(hdfs_dest))
-                self.logger.info("[{0}] HDFS pre-check passed: {1}".format(self.name, hdfs_dest))
+                self.worker_logger.info("[{0}] HDFS pre-check passed: {1}".format(self.name, hdfs_dest))
 
                 # Step 3: Fetch Metadata & Categorize
                 type_map = self.meta_fetcher.fetch_data_types(db, base_table)
@@ -1532,7 +1554,7 @@ class Worker(threading.Thread):
 
                 agg_exprs = self.query_builder.build_agg_exprs(cat_cols)
                 
-                self.logger.info("Worker {0} executing Spark Action for {1}...".format(self.name, partition))
+                self.worker_logger.info("Worker {0} executing Spark Action for {1}...".format(self.name, partition))
                 
                 agg_result = df.agg(*agg_exprs).collect()
                 if not agg_result:
@@ -1608,11 +1630,11 @@ class Worker(threading.Thread):
                 
                 json_exists = os.path.exists(nas_json_path)
                 if copy_success and json_exists:
-                    self.logger.info("Worker {0} successfully saved and copied JSON to NAS for {1}".format(self.name, partition))
+                    self.worker_logger.info("Worker {0} successfully saved and copied JSON to NAS for {1}".format(self.name, partition))
                     status = "SUCCESS"
                     remark = "JSON Generated."
                 else:
-                    self.logger.error("Worker {0} failed NAS sync for {1}. JSON Err: {2}".format(
+                    self.worker_logger.error("Worker {0} failed NAS sync for {1}. JSON Err: {2}".format(
                         self.name, partition, copy_err))
                     
                     status = "FAILED"
@@ -1646,6 +1668,7 @@ class Worker(threading.Thread):
             except Exception as e:
                 remark = str(e)
                 status = "FAILED"
+                self.worker_logger.warning("Worker {0} failed on {1}: {2}".format(self.name, partition, e))
                 self.logger.warning("Worker {0} failed on {1}: {2}".format(self.name, partition, e))
                 self.tracker.add_result(partition, "FAILED", time.time() - start_t, "Error: {0}".format(remark[:50]))
                 self.hive_logger.log_execution_status(self.execution_id, db, schema, base_table, partition, start_datetime, datetime.now(), time.time() - start_t, "failed", remark[:200])
@@ -1656,10 +1679,10 @@ class Worker(threading.Thread):
             finally:
                 # After finishing processing, write one CSV line:
                 try:
-                    self.logger.info("Worker {0} logging status for {1}...".format(self.name, full_name))
+                    self.worker_logger.info("Worker {0} logging status for {1}...".format(self.name, full_name))
                     self.logging_status(status, remark, nas_json_path, hdfs_dest)
                 except Exception as e:
-                    self.logger.error("Failed writing logging_status for {}: {}".format(full_name, e))
+                    self.worker_logger.error("Failed writing logging_status for {}: {}".format(full_name, e))
                 self.queue.task_done()
 
 
@@ -1672,10 +1695,11 @@ class UploadWorker(threading.Thread):
     def __init__(self, thread_id, job_queue, config, log_parser, hdfs_h,
                  spark, tracker, logger, execution_id, global_ts, out_path,
                  abort_event, run_id, status_file_filenm,
-                 status_file_locks, status_file_locks_lock, file_h, log_dir):
+                 status_file_locks, status_file_locks_lock, file_h, log_dir, log_prefix):
         threading.Thread.__init__(self)
         self.thread_id = thread_id
-        self.name = "Worker-{0:02d}".format(thread_id)
+        self.base_name = "Worker-{0:02d}".format(thread_id)
+        self.name = self.base_name
         self.queue = job_queue
         self.config = config
         self.log_parser = log_parser
@@ -1703,11 +1727,29 @@ class UploadWorker(threading.Thread):
         self.status = ""
         self.error_message = ""
 
+        # One fixed log file per worker, reused across all tables it processes.
+        # e.g. hdfs_sync_worker_01_20260409_143022_a1b2c3d4.log
+        worker_log_file = os.path.join(log_dir, "{0}_worker_{1:02d}_{2}_{3}.log".format(
+            log_prefix, thread_id, global_ts, run_id[:8]))
+        self.worker_log_file = worker_log_file
+        self.worker_logger = logging.getLogger("{0}.Worker.{1:02d}.{2}".format(
+            log_prefix, thread_id, run_id[:8]))
+        self.worker_logger.setLevel(logging.INFO)
+        self.worker_logger.handlers = []
+        self.worker_logger.propagate = False
+        _wfmt = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+        try:
+            _wfh = logging.FileHandler(worker_log_file)
+            _wfh.setFormatter(_wfmt)
+            self.worker_logger.addHandler(_wfh)
+        except IOError:
+            self.worker_logger = logger  # fall back to main logger if log dir not writable
+
     def logging_status(self, status, remark="-", nas_json_path="-", hdfs_path="-"):
         # 1. Define directory path
         # temp status directory: /output/<date>/stat_csv/<db>/<schema>
         status_dir = os.path.join(self.config.local_temp_dir, 'stat_csv', self.db, self.schema)
-        self.logger.info("[{0}] Logging status to directory: {1}".format(self.name, status_dir))
+        self.worker_logger.info("[{0}] Logging status to directory: {1}".format(self.name, status_dir))
 
         statused = "SUCCEEDED" if status.upper() == "SUCCESS" else status
         # Route the incoming remark to the correct column based on final status:
@@ -1724,12 +1766,12 @@ class UploadWorker(threading.Thread):
                 # errno.EEXIST is Error code 17 (File exists)
                 # If the directory was created by another thread just now, ignore the error
                 if e.errno != errno.EEXIST:
-                    self.logger.critical("Cannot create directory {0}. Error: {1}".format(status_dir, e))
+                    self.worker_logger.critical("Cannot create directory {0}. Error: {1}".format(status_dir, e))
                     return
             except Exception as e:
-                self.logger.error("Unexpected error creating directory: {0}".format(e))
+                self.worker_logger.error("Unexpected error creating directory: {0}".format(e))
                 return
-        self.logger.info("[{0}] Directory created successfully: {1}".format(self.name, status_dir))
+        self.worker_logger.info("[{0}] Directory created successfully: {1}".format(self.name, status_dir))
 
         status_file_full_path = os.path.join(status_dir, self.status_file_filenm)
 
@@ -1737,13 +1779,13 @@ class UploadWorker(threading.Thread):
         # Acquire or create a per-file lock (shared across all workers) to prevent race conditions
         with self.status_file_locks_lock:
             lock = self.status_file_locks.setdefault(status_file_full_path, threading.Lock())
-        self.logger.info("[{0}] Acquired lock for file: {1}".format(self.name, status_file_full_path))
+        self.worker_logger.info("[{0}] Acquired lock for file: {1}".format(self.name, status_file_full_path))
 
         # 4. Attribute retrieval with getattr
         short_name = getattr(self, "short_name", "")
         start_ts = getattr(self, "start_ts_tbl", "")
         reconcile_method = getattr(self, "reconcile_method", [])
-        self.logger.info("[{0}] Retrieved attributes for logging. Short Name: {1}, Start TS: {2}, Status: {3}".format(
+        self.worker_logger.info("[{0}] Retrieved attributes for logging. Short Name: {1}, Start TS: {2}, Status: {3}".format(
             self.name, short_name, start_ts, statused
         ))
 
@@ -1760,7 +1802,7 @@ class UploadWorker(threading.Thread):
         minutes, seconds = divmod(rem, 60)
         duration_str = "{:02d}:{:02d}:{:02d}".format(hours, minutes, seconds)
         end_ts = datetime.fromtimestamp(curr_time).strftime("%Y-%m-%d %H:%M:%S")
-        self.logger.info("[{0}] Calculated duration: {1}".format(self.name, duration_str))
+        self.worker_logger.info("[{0}] Calculated duration: {1}".format(self.name, duration_str))
 
         # 6. Reconcile method formatting
         reconcile_method_str = ",".join(set(reconcile_method)) if reconcile_method else ""
@@ -1780,7 +1822,7 @@ class UploadWorker(threading.Thread):
 
         row = [s.encode('utf-8') if isinstance(s, unicode) else str(s) for s in row]
 
-        self.logger.info("Prepared log row for {0}: {1}".format(self.name, row))
+        self.worker_logger.info("Prepared log row for {0}: {1}".format(self.name, row))
 
         # 8. Thread-safe file writing (Using binary mode 'ab' for Python 2.7)
         with lock:
@@ -1789,7 +1831,7 @@ class UploadWorker(threading.Thread):
                     writer = csv.writer(f, quoting=csv.QUOTE_ALL)
                     writer.writerow(row)
             except Exception as e:
-                self.logger.critical("Error writing to CSV: {0}".format(e))
+                self.worker_logger.critical("Error writing to CSV: {0}".format(e))
 
     def run(self):
         while True:
@@ -1799,12 +1841,14 @@ class UploadWorker(threading.Thread):
             try:
                 task = self.queue.get(block=True, timeout=2)
             except Queue.Empty:
-                self.tracker.update_worker_status(self.name, "[IDLE] Finished")
+                self.tracker.update_worker_status(self.base_name, "[IDLE] Finished")
                 break
 
             db = task['db']
             schema = task['schema']
             partition = task['partition']
+            # Update name to include current table for clearer log line prefixes
+            self.name = "{0}-{1}".format(self.base_name, partition)
             start_t = time.time()
             full_name = "{0}.{1}.{2}".format(db, schema, partition)
 
@@ -1815,28 +1859,12 @@ class UploadWorker(threading.Thread):
             self.start_ts_tbl = datetime.fromtimestamp(start_t).strftime("%Y-%m-%d %H:%M:%S")
             self.reconcile_method = ['hdfs_sync']
 
-            # Per-table log with timestamp keeps each run's logs distinct
-            safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', full_name)
-            table_log_file = os.path.join(self.log_dir, "table_{0}_{1}.log".format(safe_name, self.global_ts))
-            table_logger = logging.getLogger("HDFSSync.{0}.{1}".format(safe_name, self.global_ts))
-            table_logger.setLevel(logging.INFO)
-            table_logger.handlers = []
-            table_logger.propagate = False
-            _formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
-            _fh = None
-            try:
-                _fh = logging.FileHandler(table_log_file)
-                _fh.setFormatter(_formatter)
-                table_logger.addHandler(_fh)
-            except IOError:
-                table_logger = self.logger  # fall back to main logger
-
             status = "FAILED"
             remark = ""
             hdfs_dest = ""
 
             # Progress callback updates the dashboard with per-file upload counts
-            worker_name = self.name
+            worker_name = self.base_name
             tracker_ref = self.tracker
             short_name_ref = self.short_name
 
@@ -1844,8 +1872,8 @@ class UploadWorker(threading.Thread):
                 tracker_ref.update_upload_progress(worker_name, done, total, short_name_ref, done_bytes, total_bytes)
 
             try:
-                self.tracker.update_worker_status(self.name, "[BUSY] {0}".format(partition))
-                table_logger.info("[{0}] Processing: {1}".format(self.name, full_name))
+                self.tracker.update_worker_status(self.base_name, "[BUSY] {0}".format(partition))
+                self.worker_logger.info("[{0}] Processing: {1}".format(self.name, full_name))
 
                 # Step 1: Resolve local parquet path from succeed log
                 log_row, log_msg = self.log_parser.get_latest_succeed_info(db, schema, partition)
@@ -1859,14 +1887,14 @@ class UploadWorker(threading.Thread):
                     local_file_path = local_file_path.replace(
                         self.config.replace_path_from, self.config.replace_path_to)
                     if original_path != local_file_path:
-                        table_logger.info("[{0}] Path replaced: '{1}' -> '{2}'".format(
+                        self.worker_logger.info("[{0}] Path replaced: '{1}' -> '{2}'".format(
                             self.name, original_path, local_file_path))
 
-                # Step 2: Sync to HDFS with per-table log and dashboard progress callback
+                # Step 2: Sync to HDFS with per-worker log and dashboard progress callback
                 hdfs_dest = os.path.join(self.config.hdfs_path, db, schema, partition)
                 uploaded, _upload_duration = self.hdfs_h.sync_parquet(
                     local_file_path, hdfs_dest,
-                    table_logger=table_logger,
+                    table_logger=self.worker_logger,
                     progress_callback=_progress_cb)
 
                 status = "SUCCESS"
@@ -1883,13 +1911,13 @@ class UploadWorker(threading.Thread):
                     remark = remark.replace("SKIPPED: ", "").replace("SKIPPED", "").strip()
                 else:
                     status = "FAILED"
-                table_logger.info("[{0}] {1}: {2}".format(self.name, status, remark))
+                self.worker_logger.info("[{0}] {1}: {2}".format(self.name, status, remark))
                 self.tracker.add_result(partition, status, time.time() - start_t, remark)
 
             except Exception as e:
                 remark = str(e)
                 status = "FAILED"
-                table_logger.warning("[{0}] failed on {1}: {2}".format(self.name, partition, e))
+                self.worker_logger.warning("[{0}] failed on {1}: {2}".format(self.name, partition, e))
                 self.logger.warning("[{0}] failed on {1}: {2}".format(self.name, partition, e))
                 self.tracker.add_result(partition, "FAILED", time.time() - start_t,
                                         "Error: {0}".format(remark[:50]))
@@ -1900,24 +1928,12 @@ class UploadWorker(threading.Thread):
 
             finally:
                 # Clear the dashboard progress bar entry for this worker
-                self.tracker.clear_upload_progress(self.name)
-
-                # Merge important lines from per-table log into main log
-                if _fh:
-                    _fh.close()
-                    table_logger.removeHandler(_fh)
-                try:
-                    with open(table_log_file, 'r') as _tlf:
-                        for _line in _tlf:
-                            if any(tag in _line for tag in ['[ERROR]', '[WARNING]', '[CRITICAL]', 'RESULT']):
-                                self.logger.info("[{0}] {1}".format(safe_name, _line.rstrip()))
-                except IOError:
-                    pass
+                self.tracker.clear_upload_progress(self.base_name)
 
                 try:
                     self.logging_status(status, remark, "-", hdfs_dest)
                 except Exception as e:
-                    self.logger.error("Failed writing logging_status for {0}: {1}".format(full_name, e))
+                    self.worker_logger.error("Failed writing logging_status for {0}: {1}".format(full_name, e))
                 self.queue.task_done()
 
 
@@ -2030,7 +2046,7 @@ class MonitorThread(threading.Thread):
 # ==============================================================================
 
 class ParquetQueryJob(object):
-    def __init__(self, args, logger, log_path, global_date_folder, global_ts, main_path, final_out_dir, run_id):
+    def __init__(self, args, logger, log_path, global_date_folder, global_ts, main_path, final_out_dir, run_id, log_dir):
         self.args = args
         self.logger = logger
         self.log_path = log_path
@@ -2039,6 +2055,7 @@ class ParquetQueryJob(object):
         self.out_path = final_out_dir
         self.tracker = ProcessTracker(logger)
         self.global_date_folder = global_date_folder
+        self.log_dir = log_dir
 
         self.config = ConfigManager(args.env, args.master, args.map, args.list, args.table_name, logger, self.global_date_folder, self.run_id, self.global_ts, main_path)
 
@@ -2090,9 +2107,13 @@ class ParquetQueryJob(object):
         workers = []
         for i in range(num_workers):
             w = Worker(i+1, self.job_queue, self.config, self.log_parser, self.hdfs_h, self.meta_fetcher, 
-                       self.query_builder, self.hive_logger, self.spark, self.tracker, self.logger, self.execution_id, self.global_ts, self.out_path, self.abort_event, self.run_id, status_file_filenm, self.status_file_locks, self.status_file_locks_lock, self.file_h)
+                       self.query_builder, self.hive_logger, self.spark, self.tracker, self.logger, self.execution_id, self.global_ts, self.out_path, self.abort_event, self.run_id, status_file_filenm, self.status_file_locks, self.status_file_locks_lock, self.file_h, self.log_dir, "pq_query")
             workers.append(w)
             w.start()
+
+        for w in workers:
+            self.logger.info("{0} log path: {1}".format(w.base_name, w.worker_log_file))
+            print("{0} log path: {1}".format(w.base_name, w.worker_log_file))
 
         monitor = MonitorThread(self.tracker, num_workers, self.log_path,
                                 self.execution_id, "RECONCILE PARQUET MONITOR")
@@ -2221,10 +2242,14 @@ class HDFSSyncJob(object):
                 self.spark, self.tracker, self.logger, self.execution_id,
                 self.global_ts, self.out_path, self.abort_event, self.run_id,
                 status_file_filenm, self.status_file_locks, self.status_file_locks_lock,
-                self.file_h, self.log_dir
+                self.file_h, self.log_dir, "hdfs_sync"
             )
             workers.append(w)
             w.start()
+
+        for w in workers:
+            self.logger.info("{0} log path: {1}".format(w.base_name, w.worker_log_file))
+            print("{0} log path: {1}".format(w.base_name, w.worker_log_file))
 
         monitor = MonitorThread(self.tracker, num_workers, self.log_path,
                                 self.execution_id, "HDFS SYNC MONITOR")
@@ -2334,7 +2359,7 @@ if __name__ == "__main__":
         if args.mode == 'upload':
             job = HDFSSyncJob(args, logger, log_path, global_date_folder, global_ts, main_path, final_out_dir, run_id, final_log_dir)
         else:
-            job = ParquetQueryJob(args, logger, log_path, global_date_folder, global_ts, main_path, final_out_dir, run_id)
+            job = ParquetQueryJob(args, logger, log_path, global_date_folder, global_ts, main_path, final_out_dir, run_id, final_log_dir)
         job.run()
     except Exception as e:
         logger.critical("Job aborted due to critical error: {0}".format(e), exc_info=True)

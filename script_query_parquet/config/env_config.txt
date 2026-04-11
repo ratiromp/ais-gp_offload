@@ -13,16 +13,22 @@ thai_mapping_export_path=/data/AIS-EDW/gpoffload/script_reconcile_query_parquet/
 
 default_numeric_p=38
 default_numeric_s=10
-cast_real_p=24
-cast_real_s=6
+#cast_real_p=24
+cast_real_p=38
+cast_real_s=5
 cast_double_p=38
-cast_double_s=15
-round_numeric=10
+cast_double_s=14
+#round_numeric=10
+#round_real=5
+#round_double=14
+
+round_numeric=5
 round_real=5
-round_double=14
+round_double=5
+
 
 hdfs_replication=2
-hdfs_put_parallelism=20
+hdfs_put_parallelism=5
 
 spark_executor_cores=2
 spark_executor_memory=4g
